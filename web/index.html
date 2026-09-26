@@ -1,0 +1,1054 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>基金看盘 - 粗糙版</title>
+<!-- 四个前端库已本地化到 vendor/（2026-09-24：jsdelivr 被网络阻断导致整页空白，改走本地）；相对路径同时兼容 http 托管与 file:// 直开 -->
+<script src="vendor/react.min.js"></script>
+<script src="vendor/react-dom.min.js"></script>
+<script src="vendor/htm.umd.js"></script>
+<script src="vendor/echarts.min.js"></script>
+<style>
+  body { margin: 0; background: #f2f3f5; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px; }
+  @media (min-width: 1600px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+  @media (max-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .card { position: relative; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 8px; }
+  .grip { cursor: move; }
+  .del { position: absolute; top: 6px; right: 8px; border: 0; background: #f0f0f2; color: #888; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
+  .del:hover { background: #e64340; color: #fff; }
+  .hd { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 4px; font-size: 13px; }
+  .hd .chg { font-size: 12px; margin-left: 6px; font-weight: 600; }
+  .px { font-size: 15px; font-weight: 700; color: #333; }
+  .hrow2 { display: flex; justify-content: space-between; align-items: baseline; width: 100%; }
+  .hold { font-size: 12px; color: #999; }
+  .hold b { font-weight: 700; margin: 0 3px 0 1px; }
+  .flag { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: 0 0 0 1px rgba(0,0,0,.1); }
+  /* 卡片交易行：买入红描边/卖出绿描边，无持仓或A股当日买入时卖出灰掉；点按钮弹出买卖气泡 */
+  .trade { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 2px; }
+  .tbn { border: 1px solid #e64340; color: #e64340; background: #fff; border-radius: 4px; padding: 2px 12px;
+    font-size: 12px; cursor: pointer; white-space: nowrap; transition: background-color .15s ease; }
+  .tbn:hover { background: #fdecec; }
+  .tbn.sell { border-color: #1fa37a; color: #1fa37a; }
+  .tbn.sell:hover { background: #e8f7f0; }
+  .tbn[disabled] { border-color: #d9d9de; color: #c2c2c8; background: #f7f7f8; cursor: not-allowed; }
+  .tbn.ok { border-color: #f99502; color: #f99502; }
+  /* 买卖气泡：挂在交易行下方，含时间/价格/数量(±100)与确认/取消 */
+  .pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: #fff;
+    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 10px 12px; }
+  .pop::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: #fff;
+    border-left: 1px solid #ececf0; border-top: 1px solid #ececf0; transform: rotate(45deg); }
+  .pop .prow { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .pop .prow label { width: 56px; flex: none; font-size: 12px; color: #666; }
+  .pop .prow input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop .step { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
+    border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
+  .pop .step:hover { background: #ffedd1; }
+  .pop .step[disabled] { opacity: .5; cursor: not-allowed; }
+  .trade .terr { display: block; font-size: 11px; color: #e64340; margin: 0 0 8px 62px; }
+  .pop .pact { display: flex; justify-content: flex-end; gap: 8px; }
+  .up { color: #e64340; } .dn { color: #1fa37a; }
+  .tabs button { border: 0; background: #f0f0f2; padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .tabs button.on { background: #f99502; color: #fff; }
+  /* 周期行与持仓标签同排：Tab 居左、持仓信息居右（窄卡收窄省略） */
+  .tabrow { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 6px; }
+  .tabrow .hold { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .chart { width: 100%; height: 230px; }
+  .err { color: #e64340; font-size: 12px; }
+  .ld { color: #999; font-size: 12px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 8px 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .topbar .tabs button { padding: 4px 14px; }
+  /* 页面级Tab（顶栏最左）：历史模拟仓 / 实时跟随仓 */
+  .ptabs { display: flex; gap: 20px; }
+  .ptabs button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: #999; cursor: pointer; border-bottom: 2px solid transparent; }
+  .ptabs button:hover { color: #f99502; }
+  .ptabs button.on { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dtr { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #666; }
+  .dtr input { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .dtr .clr { border: 0; background: none; color: #f99502; cursor: pointer; font-size: 12px; padding: 0 2px; }
+  .search { position: relative; display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .search input { border: 1px solid #ddd; border-radius: 4px; padding: 4px 8px; width: 200px; }
+  .search .add { background: #f99502; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; cursor: pointer;
+    transition: background-color .15s ease, box-shadow .15s ease, transform .06s ease; }
+  .search .add:hover { background: #e88a00; box-shadow: 0 2px 6px rgba(249,149,2,.35); }
+  .search .add:active { background: #cf7a00; transform: translateY(1px) scale(.96); box-shadow: none; }
+  .search .add.on { box-shadow: 0 0 0 3px rgba(249,149,2,.22); }  /* 已选中个股，提示可点击添加 */
+  .drop { position: absolute; top: 32px; right: 0; background: #fff; border: 1px solid #eee; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
+  .drop div { padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  .drop div:hover { background: #fff7ea; }
+  .drop div.on { background: #ffedd1; box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
+  .tbtn { border: 1px solid #f99502; background: #fff; color: #f99502; border-radius: 4px;
+    padding: 3px 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
+  .tbtn:hover { background: #fff7ea; }
+  .tbtn.on { background: #f99502; color: #fff; }
+  /* 全部收益抽屉：右侧滑出、页面不变暗；点抽屉外/×/Esc 关闭 */
+  .drawer-mask { position: fixed; inset: 0; z-index: 40; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: #fff;
+    box-shadow: -8px 0 28px rgba(0,0,0,.16); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
+  @keyframes dslide { from { transform: translateX(100%); } }
+  .dhd { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 8px; }
+  .dhd .dtitle { font-size: 17px; font-weight: 700; color: #333; }
+  .dhd .dclose { border: 0; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
+  .dhd .dclose:hover { color: #333; }
+  .dtabs { display: flex; gap: 24px; padding: 0 20px; border-bottom: 1px solid #eee; }
+  .dtabs button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: #999; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .dtabs button:hover { color: #f99502; }
+  .dtabs button.on { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dbody { flex: 1; overflow-y: auto; padding: 6px 20px 20px; }
+  .dtot { display: flex; align-items: baseline; gap: 22px; padding: 12px 0; font-size: 13px; color: #666; }
+  .dtot b { font-size: 16px; font-weight: 700; margin: 0 2px; color: #333; }
+  /* 持仓明细：名称/现价/成本/数量/市值/盈亏/买入时间 七列 */
+  .hhd, .hrow { display: grid; grid-template-columns: 1.5fr .8fr .8fr .7fr 1fr 1.1fr 1.3fr; gap: 6px; align-items: center;
+    font-size: 13px; }
+  .hhd { color: #aaa; font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid #f0f0f2; }
+  .hrow { padding: 9px 0; border-bottom: 1px solid #f5f6f7; }
+  .hhd span, .hrow > span { text-align: right; }
+  .hhd span:first-child, .hrow .hnm { text-align: left; }
+  .hrow .hnm { color: #333; }
+  .hrow .hnm i { font-style: normal; color: #999; font-size: 11px; margin-left: 6px; }
+  .hrow .hpl b { margin-right: 4px; }
+  .hrow .hbt { font-size: 12px; color: #666; white-space: nowrap; }
+  /* 订单列表：买入红/卖出绿，卖出行右侧挂共收益，末列行删除；fr 网格自适应，窄抽屉下不横向溢出 */
+  .orow { display: grid; grid-template-columns: 44px minmax(0,1.1fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,1.2fr) minmax(0,1.2fr) 28px;
+    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: 1px solid #f5f6f7; }
+  .orow > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .orow .act { font-weight: 600; }
+  .orow .onm { color: #333; }
+  .orow .ocode { color: #999; font-size: 12px; }
+  .orow .opx, .orow .oqt { color: #333; }
+  .orow .odt { color: #999; font-size: 12px; }
+  .orow .opl { text-align: right; color: #666; font-size: 12px; }
+  .orow .opl b { font-size: 14px; font-weight: 700; margin: 0 3px; }
+  .odel { border: 0; background: none; color: #ccc; font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
+  .odel:hover { color: #e64340; }
+  .dnote { color: #c0c0c0; font-size: 12px; text-align: center; padding: 16px 0 6px; }
+
+  /* ================= 实时跟随仓（live）样式镜像 =================
+     以下为上方全部 class 的 -live 副本（自动生成），live 页独立修改互不影响 */
+  body { margin: 0; background: #f2f3f5; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  .grid-live { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px; }
+  @media (min-width: 1600px) { .grid-live { grid-template-columns: repeat(4, 1fr); } }
+  @media (max-width: 1200px) { .grid-live { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 800px) { .grid-live { grid-template-columns: 1fr; } }
+  .card-live { position: relative; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 8px; }
+  .grip-live { cursor: move; }
+  .del-live { position: absolute; top: 6px; right: 8px; border: 0; background: #f0f0f2; color: #888; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
+  .del-live:hover { background: #e64340; color: #fff; }
+  .hd-live { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 4px; font-size: 13px; }
+  .hd-live .chg-live { font-size: 12px; margin-left: 6px; font-weight: 600; }
+  .px-live { font-size: 15px; font-weight: 700; color: #333; }
+  .hrow2-live { display: flex; justify-content: space-between; align-items: baseline; width: 100%; }
+  .hold-live { font-size: 12px; color: #999; }
+  .hold-live b { font-weight: 700; margin: 0 3px 0 1px; }
+  .flag-live { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: 0 0 0 1px rgba(0,0,0,.1); }
+  /* 卡片交易行：买入红描边/卖出绿描边，无持仓或A股当日买入时卖出灰掉；点按钮弹出买卖气泡 */
+  .trade-live { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 2px; }
+  .tbn-live { border: 1px solid #e64340; color: #e64340; background: #fff; border-radius: 4px; padding: 2px 12px;
+    font-size: 12px; cursor: pointer; white-space: nowrap; transition: background-color .15s ease; }
+  .tbn-live:hover { background: #fdecec; }
+  .tbn-live.sell-live { border-color: #1fa37a; color: #1fa37a; }
+  .tbn-live.sell-live:hover { background: #e8f7f0; }
+  .tbn-live[disabled] { border-color: #d9d9de; color: #c2c2c8; background: #f7f7f8; cursor: not-allowed; }
+  .tbn-live.ok-live { border-color: #f99502; color: #f99502; }
+  /* 买卖气泡：挂在交易行下方，含时间/价格/数量(±100)与确认/取消 */
+  .pop-live { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: #fff;
+    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 10px 12px; }
+  .pop-live::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: #fff;
+    border-left: 1px solid #ececf0; border-top: 1px solid #ececf0; transform: rotate(45deg); }
+  .pop-live .prow-live { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .pop-live .prow-live label { width: 56px; flex: none; font-size: 12px; color: #666; }
+  .pop-live .prow-live input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop-live .step-live { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
+    border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
+  .pop-live .step-live:hover { background: #ffedd1; }
+  .pop-live .step-live[disabled] { opacity: .5; cursor: not-allowed; }
+  .trade-live .terr-live { display: block; font-size: 11px; color: #e64340; margin: 0 0 8px 62px; }
+  .pop-live .pact-live { display: flex; justify-content: flex-end; gap: 8px; }
+  .up-live { color: #e64340; } .dn-live { color: #1fa37a; }
+  .tabs-live button { border: 0; background: #f0f0f2; padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .tabs-live button.on-live { background: #f99502; color: #fff; }
+  /* 周期行与持仓标签同排：Tab 居左、持仓信息居右（窄卡收窄省略） */
+  .tabrow-live { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 6px; }
+  .tabrow-live .hold-live { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .chart-live { width: 100%; height: 230px; }
+  .err-live { color: #e64340; font-size: 12px; }
+  .ld-live { color: #999; font-size: 12px; }
+  .topbar-live { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 8px 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .topbar-live .tabs-live button { padding: 4px 14px; }
+  /* 页面级Tab（顶栏最左）：历史模拟仓 / 实时跟随仓 */
+  .ptabs-live { display: flex; gap: 20px; }
+  .ptabs-live button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: #999; cursor: pointer; border-bottom: 2px solid transparent; }
+  .ptabs-live button:hover { color: #f99502; }
+  .ptabs-live button.on-live { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dtr-live { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #666; }
+  .dtr-live input { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .dtr-live .clr-live { border: 0; background: none; color: #f99502; cursor: pointer; font-size: 12px; padding: 0 2px; }
+  .search-live { position: relative; display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .search-live input { border: 1px solid #ddd; border-radius: 4px; padding: 4px 8px; width: 200px; }
+  .search-live .add-live { background: #f99502; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; cursor: pointer;
+    transition: background-color .15s ease, box-shadow .15s ease, transform .06s ease; }
+  .search-live .add-live:hover { background: #e88a00; box-shadow: 0 2px 6px rgba(249,149,2,.35); }
+  .search-live .add-live:active { background: #cf7a00; transform: translateY(1px) scale(.96); box-shadow: none; }
+  .search-live .add-live.on-live { box-shadow: 0 0 0 3px rgba(249,149,2,.22); }  /* 已选中个股，提示可点击添加 */
+  .drop-live { position: absolute; top: 32px; right: 0; background: #fff; border: 1px solid #eee; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
+  .drop-live div { padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  .drop-live div:hover { background: #fff7ea; }
+  .drop-live div.on-live { background: #ffedd1; box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
+  .tbtn-live { border: 1px solid #f99502; background: #fff; color: #f99502; border-radius: 4px;
+    padding: 3px 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
+  .tbtn-live:hover { background: #fff7ea; }
+  .tbtn-live.on-live { background: #f99502; color: #fff; }
+  /* 全部收益抽屉：右侧滑出、页面不变暗；点抽屉外/×/Esc 关闭 */
+  .drawer-mask-live { position: fixed; inset: 0; z-index: 40; }
+  .drawer-live { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: #fff;
+    box-shadow: -8px 0 28px rgba(0,0,0,.16); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
+  @keyframes dslide { from { transform: translateX(100%); } }
+  .dhd-live { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 8px; }
+  .dhd-live .dtitle-live { font-size: 17px; font-weight: 700; color: #333; }
+  .dhd-live .dclose-live { border: 0; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
+  .dhd-live .dclose-live:hover { color: #333; }
+  .dtabs-live { display: flex; gap: 24px; padding: 0 20px; border-bottom: 1px solid #eee; }
+  .dtabs-live button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: #999; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .dtabs-live button:hover { color: #f99502; }
+  .dtabs-live button.on-live { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dbody-live { flex: 1; overflow-y: auto; padding: 6px 20px 20px; }
+  .dtot-live { display: flex; align-items: baseline; gap: 22px; padding: 12px 0; font-size: 13px; color: #666; }
+  .dtot-live b { font-size: 16px; font-weight: 700; margin: 0 2px; color: #333; }
+  /* 持仓明细：名称/现价/成本/数量/市值/盈亏/买入时间 七列 */
+  .hhd-live, .hrow-live { display: grid; grid-template-columns: 1.5fr .8fr .8fr .7fr 1fr 1.1fr 1.3fr; gap: 6px; align-items: center;
+    font-size: 13px; }
+  .hhd-live { color: #aaa; font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid #f0f0f2; }
+  .hrow-live { padding: 9px 0; border-bottom: 1px solid #f5f6f7; }
+  .hhd-live span, .hrow-live > span { text-align: right; }
+  .hhd-live span:first-child, .hrow-live .hnm-live { text-align: left; }
+  .hrow-live .hnm-live { color: #333; }
+  .hrow-live .hnm-live i { font-style: normal; color: #999; font-size: 11px; margin-left: 6px; }
+  .hrow-live .hpl-live b { margin-right: 4px; }
+  .hrow-live .hbt-live { font-size: 12px; color: #666; white-space: nowrap; }
+  /* 订单列表：买入红/卖出绿，卖出行右侧挂共收益，末列行删除；fr 网格自适应，窄抽屉下不横向溢出 */
+  .orow-live { display: grid; grid-template-columns: 44px minmax(0,1.1fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,1.2fr) minmax(0,1.2fr) 28px;
+    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: 1px solid #f5f6f7; }
+  .orow-live > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .orow-live .act-live { font-weight: 600; }
+  .orow-live .onm-live { color: #333; }
+  .orow-live .ocode-live { color: #999; font-size: 12px; }
+  .orow-live .opx-live, .orow-live .oqt-live { color: #333; }
+  .orow-live .odt-live { color: #999; font-size: 12px; }
+  .orow-live .opl-live { text-align: right; color: #666; font-size: 12px; }
+  .orow-live .opl-live b { font-size: 14px; font-weight: 700; margin: 0 3px; }
+  .odel-live { border: 0; background: none; color: #ccc; font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
+  .odel-live:hover { color: #e64340; }
+  .dnote-live { color: #c0c0c0; font-size: 12px; text-align: center; padding: 16px 0 6px; }
+
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const html = htm.bind(React.createElement);
+const { useState, useEffect, useRef } = React;
+
+// 卡片列表已改为持久化：首屏从 GET /api/cards 加载，种子自选股见 server/main.py 的 SEED_CARDS
+const TABS = [["min", "分时"], ["day5", "5日"], ["m5", "5分"], ["m30", "30分"], ["m60", "60分"], ["day", "日K"]];
+const UP = "#e64340", DN = "#1fa37a"; // 国内红涨绿跌
+const MAS = [["ma3", "#e6a23c"], ["ma5", "#409eff"], ["ma85", "#2f855a"], ["ma125", "#805ad5"]]; // 均线3/5/85/125：键名与后端 ind 一致
+// 双击 HTML（file://）或本地预览服务器（如 VSCode Live Preview，本机非 8000 端口）打开时，接口指向本机后端；
+// 经 uvicorn 托管打开或线上部署时，用同源相对路径
+const API_BASE = (location.protocol === "file:" ||
+  ((location.hostname === "127.0.0.1" || location.hostname === "localhost") && location.port !== "8000"))
+  ? "http://127.0.0.1:8000" : "";
+
+async function getJSON(url) {
+  const r = await fetch(API_BASE + url);
+  const d = await r.json();
+  if (d.error || d.detail) throw new Error(d.error || d.detail);
+  return d;
+}
+
+// 交易类写操作（POST/DELETE）：与 getJSON 同样把后端 {error|detail} 抛成异常给调用方显示
+async function sendJSON(url, method, body) {
+  const r = await fetch(API_BASE + url, {
+    method, headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const d = await r.json();
+  if (d.error || d.detail) throw new Error(d.error || d.detail);
+  return d;
+}
+
+// 把整份卡片列表回写后端 SQLite（增/删/拖拽排序/切换周期都会全量保存）
+async function saveCards(list) {
+  try {
+    await fetch(API_BASE + "/api/cards", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cards: list }),
+    });
+  } catch (e) { console.error("卡片保存失败", e); }
+}
+
+// datetime-local 输入值（本机时区、到分钟）：YYYY-MM-DDTHH:mm，买卖气泡的默认成交时间
+const nowLocal = () => {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+function kOpt(d, zoomAll) {
+  const rows = d.klines || [];
+  const cats = rows.map(r => r[0]);
+  const ind = d.ind || {};
+  const k = rows.map(r => [+r[1], +r[2], +r[4], +r[3]]); // 东财/腾讯序: o,c,h,l -> echarts: o,c,l,h
+  const macd = ind.macd || [];
+  const cls = rows.map(r => +r[2]);
+  const base = cls.length > 1 ? cls[cls.length - 2] : (cls[0] || 1);  // 涨跌%基准：昨收(倒数第二根收盘)
+  let lo = Math.min(...k.map(v => v[2])), hi = Math.max(...k.map(v => v[3]));
+  // 85/125日均线含窗口外预热段的价格（如大跌后均线远高于图内K线），Y轴范围须并入均线值，防均线被上下边缘裁掉
+  MAS.forEach(([key]) => (ind[key] || []).forEach(v => {
+    if (v == null) return;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }));
+  if (!(hi > lo)) { lo *= 0.999; hi = hi * 1.001 || 1; }  // 防单根K线除零
+  return {
+    animation: false,
+    // 十字光标只保留三轴指针标签（左股价/右涨跌%/底部日期），不弹白色浮窗
+    tooltip: { trigger: "axis", showContent: false, axisPointer: { type: "cross", link: [{ xAxisIndex: "all" }] } },
+    grid: [
+      { left: 44, right: 48, top: 8, height: "55%" },
+      { left: 44, right: 48, top: "66%", height: "20%" },  // 与主图间隙缩到3%，副图略加高
+    ],
+    xAxis: [
+      { type: "category", data: cats, gridIndex: 0, axisLabel: { show: false } },
+      { type: "category", data: cats, gridIndex: 1 },
+    ],
+    yAxis: [
+      { scale: false, min: lo, max: hi, gridIndex: 0,                      // 左：价格
+        axisPointer: { label: { show: true, formatter: p => (+p.value).toFixed(3) } } },
+      { scale: true, gridIndex: 1, splitLine: { show: false } },           // 中：MACD
+      { scale: false, min: lo, max: hi, gridIndex: 0, position: "right",  // 右：涨跌%（与价格同min/max严格对齐）
+        axisLine: { show: false }, splitLine: { show: false },
+        axisLabel: { formatter: v => ((v - base) / base * 100).toFixed(2) + "%" },
+        axisPointer: { label: { show: true, formatter: p => ((p.value - base) / base * 100).toFixed(2) + "%" } } },
+    ],
+    dataZoom: [{ type: "inside", xAxisIndex: [0, 1], start: zoomAll ? 0 : 80, end: 100 }],  // 平时只看最后60根；有日期筛选时显示整个区间
+    series: [
+      { name: "K", type: "candlestick", data: k,
+        itemStyle: { color: UP, color0: DN, borderColor: UP, borderColor0: DN } },
+      ...MAS.map(([key, c]) => ({ name: key.toUpperCase(), type: "line", data: ind[key], showSymbol: false, lineStyle: { width: 1, color: c } })),
+      { name: "MACD", type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: macd.map(v => v == null ? null : { value: v, itemStyle: { color: v >= 0 ? UP : DN } }) },
+      { name: "DIF", type: "line", xAxisIndex: 1, yAxisIndex: 1, data: ind.dif, showSymbol: false, lineStyle: { width: 1, color: "#333" } },
+      { name: "DEA", type: "line", xAxisIndex: 1, yAxisIndex: 1, data: ind.dea, showSymbol: false, lineStyle: { width: 1, color: "#e6a23c" } },
+    ],
+  };
+}
+
+function lineOpt(pts, base) {
+  const ys = pts.length ? pts.map(p => p[1]) : [1];
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (!(hi > lo)) { lo *= 0.999; hi = hi * 1.001 || 1; }
+  base = base || ys[0] || 1;  // 分时%基准：昨收，缺省用首价
+  return {
+    animation: false,
+    // 同 K 线：只要三轴指针标签，不要白色浮窗
+    tooltip: { trigger: "axis", showContent: false, axisPointer: { type: "cross" } },
+    grid: { left: 44, right: 48, top: 8, bottom: 20 },
+    xAxis: { type: "category", data: pts.map(p => p[0]) },
+    yAxis: [
+      { scale: false, min: lo, max: hi,
+        axisPointer: { label: { show: true, formatter: p => (+p.value).toFixed(3) } } },
+      { scale: false, min: lo, max: hi, position: "right", axisLine: { show: false }, splitLine: { show: false },
+        axisLabel: { formatter: v => ((v - base) / base * 100).toFixed(2) + "%" },
+        axisPointer: { label: { show: true, formatter: p => ((p.value - base) / base * 100).toFixed(2) + "%" } } },
+    ],
+    dataZoom: [{ type: "inside" }],
+    series: [{ type: "line", data: ys, showSymbol: false, lineStyle: { color: "#f99502" } }],
+  };
+}
+
+function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade }) {
+  const ref = useRef();
+  const tradeRef = useRef();  // 交易行（含气泡）引用：用于判断气泡外点击
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+  // 卡片内联交易：form=null 只显示按钮；点买/卖弹出气泡（时间/价格/数量±100），提交走 POST /api/orders
+  const [form, setForm] = useState(null);
+  const [fprice, setFprice] = useState("");
+  const [fqty, setFqty] = useState("");
+  const [ftime, setFtime] = useState("");  // 成交时间：默认顶栏结束日期（空则开始日期）＋当前钟点，可改
+  const [terr, setTerr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const [dayPx, setDayPx] = useState(null);  // 选了结束日期时：截止日最后一根K线收盘与前一根收盘（当日股价/涨跌基准）
+  useEffect(() => {
+    const chart = echarts.init(ref.current);
+    let dead = false;
+    setErr(""); setLoading(true); setDayPx(null);
+    (async () => {
+      try {
+        if (period === "day5") throw new Error("5日待接入(东财 trends2)");
+        if (period === "min") {
+          const d = await getJSON(`/api/minute?symbol=${symbol}`);
+          const pts = (d.points || []).map(s => { const a = s.split(" "); return [a[0], +a[1]]; });
+          chart.setOption(lineOpt(pts, +((d.quote || [])[4])), true);  // quote[4]=昨收
+        } else {
+          const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
+          const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
+          chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
+          const tail = d.tail || [];  // 截止日收盘：不晚于结束日期的最后两根K线（区间落在周末等非交易日、图内为空时也能取到"当日价"）
+          if (dend && tail.length >= 2)
+            setDayPx({ price: +tail[tail.length - 1][2], prev: +tail[tail.length - 2][2] });
+        }
+      } catch (e) { if (!dead) setErr(String(e.message || e)); }
+      finally { if (!dead) setLoading(false); }
+    })();
+    const onRs = () => chart.resize();
+    window.addEventListener("resize", onRs);
+    return () => { dead = true; window.removeEventListener("resize", onRs); chart.dispose(); };
+  }, [symbol, period, dstart, dend]);
+  // 买卖气泡：点气泡外或按 Esc 关闭（两个买卖按钮在 tradeRef 内，点按钮不触发外部关闭，由按钮自己切换）
+  useEffect(() => {
+    if (!form) return;
+    const onDoc = e => { if (tradeRef.current && !tradeRef.current.contains(e.target)) setForm(null); };
+    const onKey = e => e.key === "Escape" && setForm(null);
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
+  }, [form]);
+  // 现价/涨跌：无结束日期走 App 批量报价（各卡一致）；选了结束日期则取截止日最后一根K线收盘=当日价，
+  // 涨跌基准=前一根收盘（与图右轴%口径一致，颜色随当日涨跌）
+  const px = dayPx ? dayPx.price : (quote ? quote.price : null);
+  const prevPx = dayPx ? dayPx.prev : (quote ? quote.prev : null);
+  const chg = px != null && prevPx ? (px - prevPx) / prevPx * 100 : null;
+  // 持仓盈亏始终按实时报价算（仓位是当下的，不随历史日期回放）：盈亏 = (现价-成本)×数量
+  const pl = quote && holding ? (quote.price - holding.cost) * holding.shares : null;
+  const plpct = quote && holding && holding.cost ? (quote.price - holding.cost) / holding.cost * 100 : null;
+  const sellable = holding ? (holding.sellable != null ? holding.sellable : holding.shares) : 0;  // 可卖数量：A股当日买入的份额 T+1 锁到明日，仅锁卖出按钮，盈亏照常显示
+  const flag = symbol.startsWith("hk") ? "hk" : symbol.startsWith("us") ? "us" : "";
+  const openForm = side => {
+    if (side === "sell" && sellable <= 0) return;
+    if (form === side) { setForm(null); return; }  // 再点同一按钮＝收起气泡
+    const now = nowLocal(), day = dend || dstart;  // 买入/卖出时间默认 = 顶栏结束日期（空则开始日期）＋当前钟点
+    setForm(side); setTerr("");
+    setFprice(quote ? String(quote.price) : "");   // 价格默认现价；卖出数量默认全部可卖
+    setFqty(side === "sell" ? String(sellable) : "100");
+    setFtime(day ? day + "T" + now.slice(11) : now);
+  };
+  const stepQty = d => setFqty(v => String(Math.max(0, (parseFloat(v) || 0) + d * 100)));  // 数量加减，每次100
+  const submitTrade = async () => {
+    const price = parseFloat(fprice), qty = parseFloat(fqty);
+    if (!(price > 0) || !(qty > 0)) { setTerr("价格/数量需大于0"); return; }
+    setBusy(true); setTerr("");
+    try {
+      await sendJSON("/api/orders", "POST", { symbol, name, side: form, price, qty, ts: ftime });
+      setForm(null); setDone(form); setTimeout(() => setDone(""), 1500);
+      onTrade();  // 刷新持仓/订单/汇总（不在卡里的新持仓会随 symKey 联动补报价）
+    } catch (e) { setTerr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  return html`<div className="card"
+    onDragOver=${e => e.preventDefault()}
+    onDrop=${() => onDropCard(index)}>
+    <button className="del" title="删除卡片" onClick=${() => onDelete(symbol)}>✕</button>
+    <div className="hd">
+      <span className="grip" draggable="true"
+        onDragStart=${e => { e.dataTransfer.setData("text/plain", String(index)); e.dataTransfer.effectAllowed = "move"; onDragStart(index); }}>
+        ≡ <b>${name}</b>${flag && html`<img className="flag" draggable="false" src=${"vendor/flags/" + flag + ".svg"} alt="" />`}<span style=${{ opacity: .55, fontSize: 12 }}>${symbol}</span>
+      </span>
+      <div className="hrow2">
+        <span>${px != null && chg != null && html`<span className=${"px" + (chg > 0 ? " up" : chg < 0 ? " dn" : "")}>${px}</span><span className=${"chg" + (chg > 0 ? " up" : chg < 0 ? " dn" : "")}>${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span>`}</span>
+      </div>
+      <div className="trade" ref=${tradeRef}>
+        <button className="tbn" disabled=${busy} onClick=${() => openForm("buy")}>${done === "buy" ? "已买入" : "买入"}</button>
+        <button className="tbn sell" disabled=${sellable <= 0 || busy}
+          title=${sellable > 0 ? "可卖 " + sellable : holding ? "A股当日买入，次日可卖" : "无持仓"}
+          onClick=${() => openForm("sell")}>${done === "sell" ? "已卖出" : "卖出"}</button>
+        ${form && html`<div className="pop">
+          <div className="prow">
+            <label>${form === "buy" ? "买入时间" : "卖出时间"}</label>
+            <input type="datetime-local" value=${ftime} onChange=${e => setFtime(e.target.value)} />
+          </div>
+          <div className="prow">
+            <label>价格</label>
+            <input type="number" step="any" min="0" value=${fprice} onChange=${e => setFprice(e.target.value)} placeholder="价格" />
+          </div>
+          <div className="prow">
+            <label>数量</label>
+            <button className="step" disabled=${busy} onClick=${() => stepQty(-1)}>−</button>
+            <input type="number" step="any" min="0" value=${fqty} onChange=${e => setFqty(e.target.value)} placeholder="数量" />
+            <button className="step" disabled=${busy} onClick=${() => stepQty(1)}>＋</button>
+          </div>
+          ${terr && html`<span className="terr">${terr}</span>`}
+          <div className="pact">
+            <button className="tbn ok" disabled=${busy} onClick=${submitTrade}>${busy ? "提交中…" : "确认"}</button>
+            <button className="tbn" style=${{ borderColor: "#d9d9de", color: "#999", background: "#fff" }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
+          </div>
+        </div>`}
+      </div>
+      <div className="tabrow">
+        <span className="tabs">
+          ${TABS.map(([p, t]) => html`<button key=${p} className=${p === period ? "on" : ""} onClick=${() => onPeriod(symbol, p)}>${t}</button>`)}
+        </span>
+        ${holding && pl != null && html`<span className="hold">持仓盈亏<b className=${pl >= 0 ? "up" : "dn"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b><span className=${plpct >= 0 ? "up" : "dn"}>${plpct >= 0 ? "+" : ""}${plpct.toFixed(2)}%</span></span>`}
+      </div>
+    </div>
+    <div className="chart" ref=${ref}></div>
+    ${loading && !err && html`<div className="ld">加载中…</div>`}
+    ${err && html`<div className="err">${err}</div>`}
+  </div>`;
+}
+
+// 全部收益抽屉：右侧滑出。持仓 tab 用 /api/holdings + 批量报价实时计算；订单 tab 用 /api/orders 真实流水（每笔 realized + 行删除）
+function TotalDrawer({ holdings, quotes, cards, orders, realizedTotal, onDelOrder, onClose }) {
+  const [tab, setTab] = useState("hold");
+  useEffect(() => {  // Esc 关闭，同时锁住页面滚动
+    const onKey = e => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  const names = {};
+  cards.forEach(c => { names[c.symbol] = c.name; });
+  // 仅统计已有报价的持仓；全部收益% = 总盈亏 / 总成本（与原汇总条口径一致）
+  const rows = Object.entries(holdings).map(([s, h]) => ({ s, ...h, q: quotes[s] })).filter(x => x.q);
+  const tCost = rows.reduce((a, x) => a + x.shares * x.cost, 0);
+  const tMv = rows.reduce((a, x) => a + x.shares * x.q.price, 0);
+  const tFloat = tMv - tCost;                // 浮动盈亏
+  const tPl = tFloat + realizedTotal;        // 全部收益 = 浮动 + 已实现（卖出落袋）
+  const tPct = tCost ? tPl / tCost * 100 : 0;
+  return html`<div className="drawer-mask" onClick=${onClose}>
+    <div className="drawer" onClick=${e => e.stopPropagation()}>
+      <div className="dhd">
+        <span className="dtitle">全部收益</span>
+        <button className="dclose" title="关闭" onClick=${onClose}>✕</button>
+      </div>
+      <div className="dtabs">
+        <button className=${tab === "hold" ? "on" : ""} onClick=${() => setTab("hold")}>持仓(${Object.keys(holdings).length})</button>
+        <button className=${tab === "order" ? "on" : ""} onClick=${() => setTab("order")}>订单</button>
+      </div>
+      <div className="dbody">
+        ${tab === "hold" ? html`<div>
+          <div className="dtot">
+            <span>全部收益<b className=${tPl >= 0 ? "up" : "dn"}>${tPl >= 0 ? "+" : ""}${tPl.toFixed(2)}</b><span className=${tPct >= 0 ? "up" : "dn"}>(${tPct >= 0 ? "+" : ""}${tPct.toFixed(2)}%)</span></span>
+            ${realizedTotal !== 0 && html`<span>已实现<b className=${realizedTotal >= 0 ? "up" : "dn"}>${realizedTotal >= 0 ? "+" : ""}${realizedTotal.toFixed(2)}</b></span>`}
+            <span>总市值<b>${tMv.toFixed(2)}</b></span>
+            <span>总成本<b>${tCost.toFixed(2)}</b></span>
+          </div>
+          <div className="hhd"><span>名称</span><span>现价</span><span>成本</span><span>数量</span><span>市值</span><span>盈亏</span><span>买入时间</span></div>
+          ${rows.map(x => {
+            const pl = (x.q.price - x.cost) * x.shares;
+            const plp = x.cost ? (x.q.price - x.cost) / x.cost * 100 : 0;
+            return html`<div className="hrow" key=${x.s}>
+              <span className="hnm">${names[x.s] || x.name || x.s}<i>${x.s}</i></span>
+              <span>${x.q.price.toFixed(3)}</span>
+              <span>${x.cost.toFixed(3)}</span>
+              <span>${x.shares}</span>
+              <span>${(x.shares * x.q.price).toFixed(2)}</span>
+              <span className="hpl"><b className=${pl >= 0 ? "up" : "dn"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b><span className=${plp >= 0 ? "up" : "dn"}>${plp >= 0 ? "+" : ""}${plp.toFixed(2)}%</span></span>
+              <span className="hbt">${x.buy_ts || "—"}</span>
+            </div>`;
+          })}
+        </div>` : html`<div>
+          ${orders.length ? html`${orders.map(o => html`<div className="orow" key=${o.id}>
+            <b className=${"act " + (o.side === "buy" ? "up" : "dn")}>${o.side === "buy" ? "买入" : "卖出"}</b>
+            <span className="onm">${o.name}</span>
+            <span className="ocode">${o.symbol}</span>
+            <span className="opx">${o.price.toFixed(2)}元</span>
+            <span className="oqt">${+o.qty}股</span>
+            <span className="odt">${o.ts}</span>
+            <span className="opl">${o.realized != null && html`共收益<b className=${o.realized >= 0 ? "up" : "dn"}>${o.realized >= 0 ? "+" : ""}${o.realized.toFixed(2)}</b>元`}</span>
+            <button className="odel" title="删除此笔记录" onClick=${() => onDelOrder(o.id)}>✕</button>
+          </div>`)}
+          <div className="dnote">买入行的收益体现在持仓盈亏中；删除任一记录后持仓与收益自动重算</div>`
+          : html`<div className="dnote">暂无交易记录，去卡片点「买入」模拟一笔</div>`}
+        </div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+const GTABS = [["min", "分时"], ["day5", "5日"], ["m5", "5分"], ["m30", "30分"], ["m60", "60分"], ["day", "日K"], ["other", "其他"]];
+const PAGES = [["hist", "历史模拟仓"], ["live", "实时跟随仓"]];  // 页面级Tab：hist=历史模拟仓（原表、原class）；live=实时跟随仓（表加 _live、class 加 -live，实现见下方克隆区）
+
+
+// ==================== 实时跟随仓（live）克隆区 ====================
+// CardLive / TotalDrawerLive / LiveApp 为上方历史模拟仓各组件的完整克隆：
+// 前端 class 一律带 -live 后缀、后端表带 _live 后缀、读写接口带 ?scope=live；两套代码可独立修改互不影响。
+
+// live 页卡片列表回写（PUT /api/cards?scope=live）
+async function saveCardsLive(list) {
+  try {
+    await fetch(API_BASE + "/api/cards?scope=live", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cards: list }),
+    });
+  } catch (e) { console.error("卡片保存失败(live)", e); }
+}
+
+function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade }) {
+  const ref = useRef();
+  const tradeRef = useRef();  // 交易行（含气泡）引用：用于判断气泡外点击
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+  // 卡片内联交易：form=null 只显示按钮；点买/卖弹出气泡（时间/价格/数量±100），提交走 POST /api/orders
+  const [form, setForm] = useState(null);
+  const [fprice, setFprice] = useState("");
+  const [fqty, setFqty] = useState("");
+  const [ftime, setFtime] = useState("");  // 成交时间：默认顶栏结束日期（空则开始日期）＋当前钟点，可改
+  const [terr, setTerr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const [dayPx, setDayPx] = useState(null);  // 选了结束日期时：截止日最后一根K线收盘与前一根收盘（当日股价/涨跌基准）
+  useEffect(() => {
+    const chart = echarts.init(ref.current);
+    let dead = false;
+    setErr(""); setLoading(true); setDayPx(null);
+    (async () => {
+      try {
+        if (period === "day5") throw new Error("5日待接入(东财 trends2)");
+        if (period === "min") {
+          const d = await getJSON(`/api/minute?symbol=${symbol}`);
+          const pts = (d.points || []).map(s => { const a = s.split(" "); return [a[0], +a[1]]; });
+          chart.setOption(lineOpt(pts, +((d.quote || [])[4])), true);  // quote[4]=昨收
+        } else {
+          const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
+          const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
+          chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
+          const tail = d.tail || [];  // 截止日收盘：不晚于结束日期的最后两根K线（区间落在周末等非交易日、图内为空时也能取到"当日价"）
+          if (dend && tail.length >= 2)
+            setDayPx({ price: +tail[tail.length - 1][2], prev: +tail[tail.length - 2][2] });
+        }
+      } catch (e) { if (!dead) setErr(String(e.message || e)); }
+      finally { if (!dead) setLoading(false); }
+    })();
+    const onRs = () => chart.resize();
+    window.addEventListener("resize", onRs);
+    return () => { dead = true; window.removeEventListener("resize", onRs); chart.dispose(); };
+  }, [symbol, period, dstart, dend]);
+  // 买卖气泡：点气泡外或按 Esc 关闭（两个买卖按钮在 tradeRef 内，点按钮不触发外部关闭，由按钮自己切换）
+  useEffect(() => {
+    if (!form) return;
+    const onDoc = e => { if (tradeRef.current && !tradeRef.current.contains(e.target)) setForm(null); };
+    const onKey = e => e.key === "Escape" && setForm(null);
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
+  }, [form]);
+  // 现价/涨跌：无结束日期走 App 批量报价（各卡一致）；选了结束日期则取截止日最后一根K线收盘=当日价，
+  // 涨跌基准=前一根收盘（与图右轴%口径一致，颜色随当日涨跌）
+  const px = dayPx ? dayPx.price : (quote ? quote.price : null);
+  const prevPx = dayPx ? dayPx.prev : (quote ? quote.prev : null);
+  const chg = px != null && prevPx ? (px - prevPx) / prevPx * 100 : null;
+  // 持仓盈亏始终按实时报价算（仓位是当下的，不随历史日期回放）：盈亏 = (现价-成本)×数量
+  const pl = quote && holding ? (quote.price - holding.cost) * holding.shares : null;
+  const plpct = quote && holding && holding.cost ? (quote.price - holding.cost) / holding.cost * 100 : null;
+  const sellable = holding ? (holding.sellable != null ? holding.sellable : holding.shares) : 0;  // 可卖数量：A股当日买入的份额 T+1 锁到明日，仅锁卖出按钮，盈亏照常显示
+  const flag = symbol.startsWith("hk") ? "hk" : symbol.startsWith("us") ? "us" : "";
+  const openForm = side => {
+    if (side === "sell" && sellable <= 0) return;
+    if (form === side) { setForm(null); return; }  // 再点同一按钮＝收起气泡
+    const now = nowLocal(), day = dend || dstart;  // 买入/卖出时间默认 = 顶栏结束日期（空则开始日期）＋当前钟点
+    setForm(side); setTerr("");
+    setFprice(quote ? String(quote.price) : "");   // 价格默认现价；卖出数量默认全部可卖
+    setFqty(side === "sell" ? String(sellable) : "100");
+    setFtime(day ? day + "T" + now.slice(11) : now);
+  };
+  const stepQty = d => setFqty(v => String(Math.max(0, (parseFloat(v) || 0) + d * 100)));  // 数量加减，每次100
+  const submitTrade = async () => {
+    const price = parseFloat(fprice), qty = parseFloat(fqty);
+    if (!(price > 0) || !(qty > 0)) { setTerr("价格/数量需大于0"); return; }
+    setBusy(true); setTerr("");
+    try {
+      await sendJSON("/api/orders?scope=live", "POST", { symbol, name, side: form, price, qty, ts: ftime });
+      setForm(null); setDone(form); setTimeout(() => setDone(""), 1500);
+      onTrade();  // 刷新持仓/订单/汇总（不在卡里的新持仓会随 symKey 联动补报价）
+    } catch (e) { setTerr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  return html`<div className="card-live"
+    onDragOver=${e => e.preventDefault()}
+    onDrop=${() => onDropCard(index)}>
+    <button className="del-live" title="删除卡片" onClick=${() => onDelete(symbol)}>✕</button>
+    <div className="hd-live">
+      <span className="grip-live" draggable="true"
+        onDragStart=${e => { e.dataTransfer.setData("text/plain", String(index)); e.dataTransfer.effectAllowed = "move"; onDragStart(index); }}>
+        ≡ <b>${name}</b>${flag && html`<img className="flag-live" draggable="false" src=${"vendor/flags/" + flag + ".svg"} alt="" />`}<span style=${{ opacity: .55, fontSize: 12 }}>${symbol}</span>
+      </span>
+      <div className="hrow2-live">
+        <span>${px != null && chg != null && html`<span className=${"px-live" + (chg > 0 ? " up-live" : chg < 0 ? " dn-live" : "")}>${px}</span><span className=${"chg-live" + (chg > 0 ? " up-live" : chg < 0 ? " dn-live" : "")}>${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span>`}</span>
+      </div>
+      <div className="trade-live" ref=${tradeRef}>
+        <button className="tbn-live" disabled=${busy} onClick=${() => openForm("buy")}>${done === "buy" ? "已买入" : "买入"}</button>
+        <button className="tbn-live sell-live" disabled=${sellable <= 0 || busy}
+          title=${sellable > 0 ? "可卖 " + sellable : holding ? "A股当日买入，次日可卖" : "无持仓"}
+          onClick=${() => openForm("sell")}>${done === "sell" ? "已卖出" : "卖出"}</button>
+        ${form && html`<div className="pop-live">
+          <div className="prow-live">
+            <label>${form === "buy" ? "买入时间" : "卖出时间"}</label>
+            <input type="datetime-local" value=${ftime} onChange=${e => setFtime(e.target.value)} />
+          </div>
+          <div className="prow-live">
+            <label>价格</label>
+            <input type="number" step="any" min="0" value=${fprice} onChange=${e => setFprice(e.target.value)} placeholder="价格" />
+          </div>
+          <div className="prow-live">
+            <label>数量</label>
+            <button className="step-live" disabled=${busy} onClick=${() => stepQty(-1)}>−</button>
+            <input type="number" step="any" min="0" value=${fqty} onChange=${e => setFqty(e.target.value)} placeholder="数量" />
+            <button className="step-live" disabled=${busy} onClick=${() => stepQty(1)}>＋</button>
+          </div>
+          ${terr && html`<span className="terr-live">${terr}</span>`}
+          <div className="pact-live">
+            <button className="tbn-live ok-live" disabled=${busy} onClick=${submitTrade}>${busy ? "提交中…" : "确认"}</button>
+            <button className="tbn-live" style=${{ borderColor: "#d9d9de", color: "#999", background: "#fff" }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
+          </div>
+        </div>`}
+      </div>
+      <div className="tabrow-live">
+        <span className="tabs-live">
+          ${TABS.map(([p, t]) => html`<button key=${p} className=${p === period ? "on-live" : ""} onClick=${() => onPeriod(symbol, p)}>${t}</button>`)}
+        </span>
+        ${holding && pl != null && html`<span className="hold-live">持仓盈亏<b className=${pl >= 0 ? "up-live" : "dn-live"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b><span className=${plpct >= 0 ? "up-live" : "dn-live"}>${plpct >= 0 ? "+" : ""}${plpct.toFixed(2)}%</span></span>`}
+      </div>
+    </div>
+    <div className="chart-live" ref=${ref}></div>
+    ${loading && !err && html`<div className="ld-live">加载中…</div>`}
+    ${err && html`<div className="err-live">${err}</div>`}
+  </div>`;
+}
+
+// 全部收益抽屉：右侧滑出。持仓 tab 用 /api/holdings + 批量报价实时计算；订单 tab 用 /api/orders 真实流水（每笔 realized + 行删除）
+
+function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDelOrder, onClose }) {
+  const [tab, setTab] = useState("hold");
+  useEffect(() => {  // Esc 关闭，同时锁住页面滚动
+    const onKey = e => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  const names = {};
+  cards.forEach(c => { names[c.symbol] = c.name; });
+  // 仅统计已有报价的持仓；全部收益% = 总盈亏 / 总成本（与原汇总条口径一致）
+  const rows = Object.entries(holdings).map(([s, h]) => ({ s, ...h, q: quotes[s] })).filter(x => x.q);
+  const tCost = rows.reduce((a, x) => a + x.shares * x.cost, 0);
+  const tMv = rows.reduce((a, x) => a + x.shares * x.q.price, 0);
+  const tFloat = tMv - tCost;                // 浮动盈亏
+  const tPl = tFloat + realizedTotal;        // 全部收益 = 浮动 + 已实现（卖出落袋）
+  const tPct = tCost ? tPl / tCost * 100 : 0;
+  return html`<div className="drawer-mask-live" onClick=${onClose}>
+    <div className="drawer-live" onClick=${e => e.stopPropagation()}>
+      <div className="dhd-live">
+        <span className="dtitle-live">全部收益</span>
+        <button className="dclose-live" title="关闭" onClick=${onClose}>✕</button>
+      </div>
+      <div className="dtabs-live">
+        <button className=${tab === "hold" ? "on-live" : ""} onClick=${() => setTab("hold")}>持仓(${Object.keys(holdings).length})</button>
+        <button className=${tab === "order" ? "on-live" : ""} onClick=${() => setTab("order")}>订单</button>
+      </div>
+      <div className="dbody-live">
+        ${tab === "hold" ? html`<div>
+          <div className="dtot-live">
+            <span>全部收益<b className=${tPl >= 0 ? "up-live" : "dn-live"}>${tPl >= 0 ? "+" : ""}${tPl.toFixed(2)}</b><span className=${tPct >= 0 ? "up-live" : "dn-live"}>(${tPct >= 0 ? "+" : ""}${tPct.toFixed(2)}%)</span></span>
+            ${realizedTotal !== 0 && html`<span>已实现<b className=${realizedTotal >= 0 ? "up-live" : "dn-live"}>${realizedTotal >= 0 ? "+" : ""}${realizedTotal.toFixed(2)}</b></span>`}
+            <span>总市值<b>${tMv.toFixed(2)}</b></span>
+            <span>总成本<b>${tCost.toFixed(2)}</b></span>
+          </div>
+          <div className="hhd-live"><span>名称</span><span>现价</span><span>成本</span><span>数量</span><span>市值</span><span>盈亏</span><span>买入时间</span></div>
+          ${rows.map(x => {
+            const pl = (x.q.price - x.cost) * x.shares;
+            const plp = x.cost ? (x.q.price - x.cost) / x.cost * 100 : 0;
+            return html`<div className="hrow-live" key=${x.s}>
+              <span className="hnm-live">${names[x.s] || x.name || x.s}<i>${x.s}</i></span>
+              <span>${x.q.price.toFixed(3)}</span>
+              <span>${x.cost.toFixed(3)}</span>
+              <span>${x.shares}</span>
+              <span>${(x.shares * x.q.price).toFixed(2)}</span>
+              <span className="hpl-live"><b className=${pl >= 0 ? "up-live" : "dn-live"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b><span className=${plp >= 0 ? "up-live" : "dn-live"}>${plp >= 0 ? "+" : ""}${plp.toFixed(2)}%</span></span>
+              <span className="hbt-live">${x.buy_ts || "—"}</span>
+            </div>`;
+          })}
+        </div>` : html`<div>
+          ${orders.length ? html`${orders.map(o => html`<div className="orow-live" key=${o.id}>
+            <b className=${"act-live " + (o.side === "buy" ? "up-live" : "dn-live")}>${o.side === "buy" ? "买入" : "卖出"}</b>
+            <span className="onm-live">${o.name}</span>
+            <span className="ocode-live">${o.symbol}</span>
+            <span className="opx-live">${o.price.toFixed(2)}元</span>
+            <span className="oqt-live">${+o.qty}股</span>
+            <span className="odt-live">${o.ts}</span>
+            <span className="opl-live">${o.realized != null && html`共收益<b className=${o.realized >= 0 ? "up-live" : "dn-live"}>${o.realized >= 0 ? "+" : ""}${o.realized.toFixed(2)}</b>元`}</span>
+            <button className="odel-live" title="删除此笔记录" onClick=${() => onDelOrder(o.id)}>✕</button>
+          </div>`)}
+          <div className="dnote-live">买入行的收益体现在持仓盈亏中；删除任一记录后持仓与收益自动重算</div>`
+          : html`<div className="dnote-live">暂无交易记录，去卡片点「买入」模拟一笔</div>`}
+        </div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+function LiveApp({ page, setPage }) {
+  const [cards, setCards] = useState([]);  // 首屏卡片从后端 SQLite 加载，不再写死在页面里
+  const applyCards = ns => { setCards(ns); saveCardsLive(ns); };  // 所有增删改统一：更新界面并回写数据库
+  useEffect(() => { getJSON("/api/cards?scope=live").then(d => setCards(d.cards || [])).catch(e => console.error("卡片加载失败", e)); }, []);
+  // 顶栏选中态由各卡周期推导：全部一致亮对应档位，不一致（或空盘）亮「其他」
+  const gperiod = cards.length > 0 && cards.every(c => c.period === cards[0].period) ? cards[0].period : "other";
+  const setAllPeriod = p => { if (p !== "other") applyCards(cards.map(c => ({ ...c, period: p }))); };  // 「其他」为混合态指示，点击不强制切换
+  const setCardPeriod = (symbol, p) => applyCards(cards.map(c => (c.symbol === symbol ? { ...c, period: p } : c)));
+  // 实时仓日期逻辑（区别于历史仓）：开始日期由用户自选并持久记忆最后一次选择（含清空），刷新后原样恢复；
+  // 结束日期默认最新一天（今天）且不持久化——每次刷新自动跟上最新；当次会话内可手改，点「清除」或刷新即回到今天
+  const todayLive = () => { const d = new Date(), p = n => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+  const [dstart, setDstart] = useState(() => { try { return localStorage.getItem("kp_dstart_live") || ""; } catch (e) { return ""; } });
+  const [dend, setDend] = useState(() => todayLive());
+  useEffect(() => {
+    try { localStorage.setItem("kp_dstart_live", dstart); } catch (e) {}
+  }, [dstart]);
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState([]);
+  const [sel, setSel] = useState(null);  // 下拉里点选的个股：点右侧＋才加卡，输入变化或重新搜索时取消选中
+  const [holdings, setHoldings] = useState({});  // symbol -> {shares, cost, sellable, name, buy_ts}，来自 GET /api/holdings（重演推导）
+  const [quotes, setQuotes] = useState({});      // symbol -> {price, prev}，来自 GET /api/quotes 批量报价
+  const [orders, setOrders] = useState([]);      // 交易流水，来自 GET /api/orders（含每笔 realized 收益）
+  const [realizedTotal, setRealizedTotal] = useState(0);  // 已实现总收益（卖出落袋合计）
+  const [showTotal, setShowTotal] = useState(false);  // 全部收益抽屉开关（顶部按钮 → 右侧滑出）
+  const loadHoldings = () => getJSON("/api/holdings?scope=live").then(d => {
+    const m = {};
+    (d.holdings || []).forEach(h => { m[h.symbol] = { shares: h.shares, cost: h.cost, sellable: h.sellable, name: h.name, buy_ts: h.buy_ts }; });
+    setHoldings(m);
+  }).catch(e => console.error("持仓加载失败", e));
+  const loadOrders = () => getJSON("/api/orders?scope=live").then(d => {
+    setOrders(d.orders || []);
+    setRealizedTotal(d.realized_total || 0);
+  }).catch(e => console.error("订单加载失败", e));
+  useEffect(() => { loadHoldings(); loadOrders(); }, []);  // 首屏拉取；买卖/删除后同样调这两个刷新推导账本
+  const symKey = [...new Set([...cards.map(c => c.symbol), ...Object.keys(holdings)])].join(",");  // 卡片+持仓合集变化时重取批量报价（持仓可能不在卡片里）
+  useEffect(() => {
+    if (!symKey) return;
+    let dead = false;
+    getJSON(`/api/quotes?symbols=${symKey}`).then(d => { if (!dead) setQuotes(d.quotes || {}); })
+      .catch(e => console.error("报价加载失败", e));
+    return () => { dead = true; };
+  }, [symKey]);
+  const toggleTotal = () => setShowTotal(v => {
+    const ns = !v;
+    if (ns && symKey) getJSON(`/api/quotes?symbols=${symKey}`).then(d => setQuotes(d.quotes || {}))
+      .catch(e => console.error("报价刷新失败", e));  // 展开时顺手刷新一次报价
+    return ns;
+  });
+  const onTrade = () => { loadHoldings(); loadOrders(); };  // 成交后刷新持仓/订单/汇总
+  const onDelOrder = id => sendJSON(`/api/orders/${id}?scope=live`, "DELETE")
+    .then(() => { loadOrders(); loadHoldings(); })
+    .catch(e => alert(e.message || e));  // 删除被依赖（后续卖出会卖超）等后端校验直接弹给用户
+  const addCard = (symbol, name) => {
+    if (!cards.some(c => c.symbol === symbol)) {
+      const p = gperiod !== "other" ? gperiod : "day";  // 新卡沿用当前统一周期，混合态回落日K
+      applyCards([{ symbol, name, period: p }, ...cards]);  // 新卡插到最前面
+    }
+    setItems([]); setQ(""); setSel(null);
+  };
+  const removeCard = symbol => applyCards(cards.filter(c => c.symbol !== symbol));
+  const [dragIdx, setDragIdx] = useState(null);
+  const moveCard = to => {
+    if (dragIdx == null || dragIdx === to) return;
+    const a = [...cards];
+    const [it] = a.splice(dragIdx, 1);
+    a.splice(to, 0, it);
+    applyCards(a);
+    setDragIdx(null);
+  };
+  const seq = useRef(0);  // 搜索请求序号：只采纳最后一次请求的结果，防旧响应覆盖新结果
+  const doSearch = async (term) => {
+    const s = String(term != null ? term : q).trim();
+    if (!s) return;
+    setSel(null);  // 新一次搜索作废旧选中
+    const my = ++seq.current;
+    try {
+      const d = await getJSON(`/api/search?q=${encodeURIComponent(s)}`);
+      if (my === seq.current) setItems(d.items || []);
+    } catch (e) { console.warn("搜索失败", e); }  // 上游偶发失败时保留上一次结果
+  };
+  // 输入即搜索：300ms 防抖（中文输入法中间态一并合并）；清空输入自动收起下拉
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (q.trim()) doSearch(q);
+      else { setItems([]); setSel(null); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+  return html`<div>
+    <div className="topbar-live">
+      <span className="ptabs-live">
+        ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on-live" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
+      </span>
+      <span className="tabs-live">
+        ${GTABS.map(([p, t]) => html`<button key=${p} className=${p === gperiod ? "on-live" : ""} onClick=${() => setAllPeriod(p)}>${t}</button>`)}
+      </span>
+      <span className="dtr-live">
+        <input type="date" value=${dstart} onChange=${e => setDstart(e.target.value)} title="开始日期" />
+        →
+        <input type="date" value=${dend} onChange=${e => setDend(e.target.value)} title="结束日期" />
+        ${(dstart || dend !== todayLive()) && html`<button className="clr-live" onClick=${() => { setDstart(""); setDend(todayLive()); }}>清除</button>`}
+      </span>
+      <span><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button></span>
+      <span className="search-live">
+        个股：
+        <input value=${q} placeholder="请输入名称/代码"
+          onChange=${e => { setQ(e.target.value); setSel(null); }}
+          onKeyDown=${e => e.key === "Enter" && !e.nativeEvent.isComposing && doSearch()} />
+        <button className=${"add-live" + (sel ? " on-live" : "")} title="添加选中的个股"
+          onClick=${() => sel ? addCard(sel.symbol, sel.name) : (items[0] ? addCard(items[0].symbol, items[0].name) : doSearch())}>＋</button>
+        ${items.length > 0 && html`<div className="drop-live">
+          ${items.map(it => html`<div key=${it.symbol} className=${sel && sel.symbol === it.symbol ? "on-live" : ""} onClick=${() => setSel(it)}>${it.name} <span style=${{ opacity: .5 }}>${it.symbol}</span></div>`)}
+        </div>`}
+      </span>
+    </div>
+    ${showTotal && html`<${TotalDrawerLive} holdings=${holdings} quotes=${quotes} cards=${cards} orders=${orders} realizedTotal=${realizedTotal}
+      onDelOrder=${onDelOrder} onClose=${() => setShowTotal(false)} />`}
+    <div className="grid-live">
+      ${cards.map((c, i) => html`<${CardLive} key=${c.symbol} symbol=${c.symbol} name=${c.name} period=${c.period} onPeriod=${setCardPeriod}
+        index=${i} onDragStart=${setDragIdx} onDropCard=${moveCard} onDelete=${removeCard}
+        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} />`) }
+    </div>
+  </div>`;
+}
+
+function HistApp({ page, setPage }) {
+  const [cards, setCards] = useState([]);  // 首屏卡片从后端 SQLite 加载，不再写死在页面里
+  const applyCards = ns => { setCards(ns); saveCards(ns); };  // 所有增删改统一：更新界面并回写数据库
+  useEffect(() => { getJSON("/api/cards").then(d => setCards(d.cards || [])).catch(e => console.error("卡片加载失败", e)); }, []);
+  // 顶栏选中态由各卡周期推导：全部一致亮对应档位，不一致（或空盘）亮「其他」
+  const gperiod = cards.length > 0 && cards.every(c => c.period === cards[0].period) ? cards[0].period : "other";
+  const setAllPeriod = p => { if (p !== "other") applyCards(cards.map(c => ({ ...c, period: p }))); };  // 「其他」为混合态指示，点击不强制切换
+  const setCardPeriod = (symbol, p) => applyCards(cards.map(c => (c.symbol === symbol ? { ...c, period: p } : c)));
+  // 日期筛选记忆：最后一次选择存 localStorage，刷新/更新页面后自动恢复（清除日期也被记住，下次进来不过滤）
+  const [dstart, setDstart] = useState(() => { try { return localStorage.getItem("kp_dstart") || ""; } catch (e) { return ""; } });
+  const [dend, setDend] = useState(() => { try { return localStorage.getItem("kp_dend") || ""; } catch (e) { return ""; } });
+  useEffect(() => {
+    try { localStorage.setItem("kp_dstart", dstart); localStorage.setItem("kp_dend", dend); } catch (e) {}
+  }, [dstart, dend]);
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState([]);
+  const [sel, setSel] = useState(null);  // 下拉里点选的个股：点右侧＋才加卡，输入变化或重新搜索时取消选中
+  const [holdings, setHoldings] = useState({});  // symbol -> {shares, cost, sellable, name, buy_ts}，来自 GET /api/holdings（重演推导）
+  const [quotes, setQuotes] = useState({});      // symbol -> {price, prev}，来自 GET /api/quotes 批量报价
+  const [orders, setOrders] = useState([]);      // 交易流水，来自 GET /api/orders（含每笔 realized 收益）
+  const [realizedTotal, setRealizedTotal] = useState(0);  // 已实现总收益（卖出落袋合计）
+  const [showTotal, setShowTotal] = useState(false);  // 全部收益抽屉开关（顶部按钮 → 右侧滑出）
+  const loadHoldings = () => getJSON("/api/holdings").then(d => {
+    const m = {};
+    (d.holdings || []).forEach(h => { m[h.symbol] = { shares: h.shares, cost: h.cost, sellable: h.sellable, name: h.name, buy_ts: h.buy_ts }; });
+    setHoldings(m);
+  }).catch(e => console.error("持仓加载失败", e));
+  const loadOrders = () => getJSON("/api/orders").then(d => {
+    setOrders(d.orders || []);
+    setRealizedTotal(d.realized_total || 0);
+  }).catch(e => console.error("订单加载失败", e));
+  useEffect(() => { loadHoldings(); loadOrders(); }, []);  // 首屏拉取；买卖/删除后同样调这两个刷新推导账本
+  const symKey = [...new Set([...cards.map(c => c.symbol), ...Object.keys(holdings)])].join(",");  // 卡片+持仓合集变化时重取批量报价（持仓可能不在卡片里）
+  useEffect(() => {
+    if (!symKey) return;
+    let dead = false;
+    getJSON(`/api/quotes?symbols=${symKey}`).then(d => { if (!dead) setQuotes(d.quotes || {}); })
+      .catch(e => console.error("报价加载失败", e));
+    return () => { dead = true; };
+  }, [symKey]);
+  const toggleTotal = () => setShowTotal(v => {
+    const ns = !v;
+    if (ns && symKey) getJSON(`/api/quotes?symbols=${symKey}`).then(d => setQuotes(d.quotes || {}))
+      .catch(e => console.error("报价刷新失败", e));  // 展开时顺手刷新一次报价
+    return ns;
+  });
+  const onTrade = () => { loadHoldings(); loadOrders(); };  // 成交后刷新持仓/订单/汇总
+  const onDelOrder = id => sendJSON(`/api/orders/${id}`, "DELETE")
+    .then(() => { loadOrders(); loadHoldings(); })
+    .catch(e => alert(e.message || e));  // 删除被依赖（后续卖出会卖超）等后端校验直接弹给用户
+  const addCard = (symbol, name) => {
+    if (!cards.some(c => c.symbol === symbol)) {
+      const p = gperiod !== "other" ? gperiod : "day";  // 新卡沿用当前统一周期，混合态回落日K
+      applyCards([{ symbol, name, period: p }, ...cards]);  // 新卡插到最前面
+    }
+    setItems([]); setQ(""); setSel(null);
+  };
+  const removeCard = symbol => applyCards(cards.filter(c => c.symbol !== symbol));
+  const [dragIdx, setDragIdx] = useState(null);
+  const moveCard = to => {
+    if (dragIdx == null || dragIdx === to) return;
+    const a = [...cards];
+    const [it] = a.splice(dragIdx, 1);
+    a.splice(to, 0, it);
+    applyCards(a);
+    setDragIdx(null);
+  };
+  const seq = useRef(0);  // 搜索请求序号：只采纳最后一次请求的结果，防旧响应覆盖新结果
+  const doSearch = async (term) => {
+    const s = String(term != null ? term : q).trim();
+    if (!s) return;
+    setSel(null);  // 新一次搜索作废旧选中
+    const my = ++seq.current;
+    try {
+      const d = await getJSON(`/api/search?q=${encodeURIComponent(s)}`);
+      if (my === seq.current) setItems(d.items || []);
+    } catch (e) { console.warn("搜索失败", e); }  // 上游偶发失败时保留上一次结果
+  };
+  // 输入即搜索：300ms 防抖（中文输入法中间态一并合并）；清空输入自动收起下拉
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (q.trim()) doSearch(q);
+      else { setItems([]); setSel(null); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+  return html`<div>
+    <div className="topbar">
+      <span className="ptabs">
+        ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
+      </span>
+      <span className="tabs">
+        ${GTABS.map(([p, t]) => html`<button key=${p} className=${p === gperiod ? "on" : ""} onClick=${() => setAllPeriod(p)}>${t}</button>`)}
+      </span>
+      <span className="dtr">
+        <input type="date" value=${dstart} onChange=${e => setDstart(e.target.value)} title="开始日期" />
+        →
+        <input type="date" value=${dend} onChange=${e => setDend(e.target.value)} title="结束日期" />
+        ${(dstart || dend) && html`<button className="clr" onClick=${() => { setDstart(""); setDend(""); }}>清除</button>`}
+      </span>
+      <span><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button></span>
+      <span className="search">
+        个股：
+        <input value=${q} placeholder="请输入名称/代码"
+          onChange=${e => { setQ(e.target.value); setSel(null); }}
+          onKeyDown=${e => e.key === "Enter" && !e.nativeEvent.isComposing && doSearch()} />
+        <button className=${"add" + (sel ? " on" : "")} title="添加选中的个股"
+          onClick=${() => sel ? addCard(sel.symbol, sel.name) : (items[0] ? addCard(items[0].symbol, items[0].name) : doSearch())}>＋</button>
+        ${items.length > 0 && html`<div className="drop">
+          ${items.map(it => html`<div key=${it.symbol} className=${sel && sel.symbol === it.symbol ? "on" : ""} onClick=${() => setSel(it)}>${it.name} <span style=${{ opacity: .5 }}>${it.symbol}</span></div>`)}
+        </div>`}
+      </span>
+    </div>
+    ${showTotal && html`<${TotalDrawer} holdings=${holdings} quotes=${quotes} cards=${cards} orders=${orders} realizedTotal=${realizedTotal}
+      onDelOrder=${onDelOrder} onClose=${() => setShowTotal(false)} />`}
+    <div className="grid">
+      ${cards.map((c, i) => html`<${Card} key=${c.symbol} symbol=${c.symbol} name=${c.name} period=${c.period} onPeriod=${setCardPeriod}
+        index=${i} onDragStart=${setDragIdx} onDropCard=${moveCard} onDelete=${removeCard}
+        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} />`) }
+    </div>
+  </div>`;
+}
+
+// 页面壳：两个页面级Tab的切换都走这里；两页组件完全独立（HistApp / LiveApp 各自持有全部状态）
+// 页面级Tab记忆：用户最后所在一页存 localStorage（kp_page），刷新/重启后回到原地，不会跳回默认页
+function App() {
+  const [page, setPageState] = useState(() => { try { return localStorage.getItem("kp_page") === "live" ? "live" : "hist"; } catch (e) { return "hist"; } });
+  const setPage = k => { setPageState(k); try { localStorage.setItem("kp_page", k); } catch (e) {} };
+  return page === "hist"
+    ? html`<${HistApp} page=${page} setPage=${setPage} />`
+    : html`<${LiveApp} page=${page} setPage=${setPage} />`;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);
+</script>
+</body>
+</html>

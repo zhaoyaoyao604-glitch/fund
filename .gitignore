@@ -1,0 +1,17 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 运行时产物（本地数据库 / 进程文件）
+server/cards.db*
+*.pid
+*.log
+
+# 开发过程临时探针脚本
+_probe/
+
+# 调试截图
+*.png
+
+# 本地开发工具（便携 Git 等）
+.tools/
