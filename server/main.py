@@ -96,6 +96,26 @@ def _init_db():
                         "name TEXT NOT NULL, side TEXT NOT NULL CHECK(side IN ('buy','sell')), "
                         "price REAL NOT NULL CHECK(price > 0), qty REAL NOT NULL CHECK(qty > 0), "
                         "ts TEXT NOT NULL)")
+    # 界面偏好表（key-value）：所在页/日期筛选等跨浏览器共享的 UI 偏好，跟库走不跟某个浏览器的 localStorage 走
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prefs'").fetchone():
+        with con:
+            con.execute("CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    # 买入次日卡片前置的每日游标：scope(hist/live) -> 上次执行日 YYYY-MM-DD
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promo'").fetchone():
+        with con:
+            con.execute("CREATE TABLE promo (scope TEXT PRIMARY KEY, last_date TEXT NOT NULL)")
+    # 迁移：orders/orders_live 补 created_at 列（真实下单时刻，与业务 ts 分离）——买入次日前置锚它判定，
+    # hist 回放给历史日期的单也按实际操作的第二天前置；存量为 '' 不追溯
+    for t in ("orders", "orders_live"):
+        if "created_at" not in [r["name"] for r in con.execute(f"PRAGMA table_info({t})")]:
+            with con:
+                con.execute(f"ALTER TABLE {t} ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    # 账户表：每个作用域一条本金（历史模拟仓/实时跟随仓各自独立记账）；可用资金不落库，由流水重演推导
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account'").fetchone():
+        with con:
+            con.execute("CREATE TABLE account (scope TEXT PRIMARY KEY, capital REAL NOT NULL)")
+            con.executemany("INSERT INTO account (scope, capital) VALUES (?, ?)",
+                            [("hist", 1000000.0), ("live", 1000000.0)])
     con.close()
 
 
@@ -123,18 +143,34 @@ def _norm_ts(raw):
     return None
 
 
-def _replay(con, exclude_id=None, scope="hist"):
+def _norm_asof(as_of):
+    # 视点参数规范化：接受 YYYY-MM-DD（补成当天 23:59 含全天）或完整 YYYY-MM-DD HH:MM；空=当前全量。
+    # orders/holdings/account 三个接口共用，保证各处回放口径一致
+    a = (as_of or "").strip().replace("/", "-")
+    if a and len(a) == 10:
+        a += " 23:59"
+    return a or None
+
+
+def _replay(con, exclude_id=None, scope="hist", as_of=None):
     """按 (ts, id) 全量重演流水。返回 (pos, realized, conflict)：
     pos = symbol -> {shares, cost(移动加权均价), bought_today(当日买入的A股份额), buy_ts(建仓首笔买入时间), name}；
     realized = 卖出单id -> 该笔已实现收益 (卖出价-当时均价)*数量；
-    conflict = 重演中第一笔卖超的记录（正常数据恒为 None，仅删除预检时出现）"""
+    conflict = 重演中第一笔卖超的记录（正常数据恒为 None，仅删除预检时出现）。
+    as_of（"YYYY-MM-DD HH:MM"）非空时只重演该时点前的流水——历史回放视点：
+    回看某日时之后下的单不出现；T+1 的「当日买入」同样按 as_of 的日期判定，回放出的可卖数与当时一致"""
     sql = f"SELECT id, symbol, name, side, price, qty, ts FROM {_tbl(scope, 'orders')}"
-    args = ()
+    conds, args = [], []
+    if as_of:
+        conds.append("ts <= ?")
+        args.append(as_of)
     if exclude_id is not None:
-        sql += " WHERE id != ?"
-        args = (exclude_id,)
-    rows = con.execute(sql + " ORDER BY ts, id", args).fetchall()
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
+        conds.append("id != ?")
+        args.append(exclude_id)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    rows = con.execute(sql + " ORDER BY ts, id", tuple(args)).fetchall()
+    today = (as_of or datetime.datetime.now().strftime(TS_FMT))[:10]
     pos, realized, conflict = {}, {}, None
     for r in rows:
         p = pos.setdefault(r["symbol"], {"shares": 0.0, "cost": 0.0, "bought_today": 0.0, "buy_ts": None, "name": r["name"]})
@@ -158,6 +194,43 @@ def _replay(con, exclude_id=None, scope="hist"):
                 p["shares"] = p["cost"] = p["bought_today"] = 0.0
                 p["buy_ts"] = None
     return pos, realized, conflict
+
+
+def _promote_bought_cards(con, scope):
+    """买入次日卡片前置：每天首次取卡时，把「游标日(含)到昨天」有买入动作的卡片整体提到列表最前并落库，
+    多只命中按最后一笔买入动作时间降序（最新买的最前）；同一时刻录入的一批再按业务首笔买入时间升序、
+    录入先后升序排——与抽屉持仓列表（重演建仓序）完全一致，抽屉排第一的持仓卡即主页面第一张。
+    判定锚 created_at（真实下单时刻）而非业务 ts——hist 回放给历史日期的单，同样按实际操作的第二天前置；
+    只前置当前仍持仓的（买入后已清仓的不再置顶）。游标存 promo 表按 scope 各记一行（首次运行只记今天、
+    不追溯历史买入）；昨天没打开页面也无妨——下次打开时区间一并覆盖这段时间的新买入，晚开页同样补前置。"""
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    row = con.execute("SELECT last_date FROM promo WHERE scope=?", (scope,)).fetchone()
+    last = row["last_date"] if row else ""
+    if not last:  # 首次：只建游标，历史买入不触发
+        with con:
+            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES (?, ?)", (scope, today))
+        return
+    if last >= today:
+        return  # 今天已处理，幂等跳过
+    # 区间 [last, today)：定长时刻串与纯日期串的字典序比较即时间比较；存量单 created_at='' 天然不命中
+    rows = con.execute(f"SELECT symbol, MAX(created_at) AS last_buy, MIN(ts) AS first_buy, MAX(id) AS last_id "
+                       f"FROM {_tbl(scope, 'orders')} "
+                       f"WHERE side='buy' AND created_at >= ? AND created_at < ? GROUP BY symbol "
+                       f"ORDER BY last_buy DESC, first_buy ASC, last_id ASC",
+                       (last, today)).fetchall()
+    hit = []
+    if rows:
+        held = {s for s, p in _replay(con, scope=scope)[0].items() if p["shares"] > 1e-9}  # 仍持仓才前置
+        hit = [r["symbol"] for r in rows if r["symbol"] in held]
+    if hit:
+        cards = [r["symbol"] for r in
+                 con.execute(f"SELECT symbol FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()]
+        hs, cs = set(hit), set(cards)
+        ordered = [s for s in hit if s in cs] + [c for c in cards if c not in hs]  # 不在自选卡的买入流水自然跳过
+        with con:
+            con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
+    with con:
+        con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES (?, ?)", (scope, today))
 
 
 app = FastAPI()
@@ -446,29 +519,49 @@ async def search(q: str = Query(...)):
 @app.get("/api/cards")
 async def cards_get(scope: str = "hist"):
     con = _conn()
+    _promote_bought_cards(con, scope)  # 买入次日优先前置：每天首次取卡时重排落库（游标内幂等）
     rows = con.execute(f"SELECT symbol, name, period FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()
     con.close()
     return {"cards": [dict(r) for r in rows]}
 
 
 @app.get("/api/holdings")
-async def holdings_get(scope: str = "hist"):
+async def holdings_get(scope: str = "hist", as_of: str = ""):
+    # as_of：历史回放视点（YYYY-MM-DD 或 YYYY-MM-DD HH:MM）；只给日期按当天 23:59 含全天，
+    # 用于回看某日的持仓——该日之后下的单不出现（如27号买的仓，26号视点里不存在；
+    # 此截断天然保证「检索买入日之前的日期看不到该仓」），买入当天即显示，T+1 只锁卖出按钮
+    a = _norm_asof(as_of)
     con = _conn()
-    pos, _, _ = _replay(con, scope=scope)
+    pos, _, _ = _replay(con, scope=scope, as_of=a)
     con.close()
-    return {"holdings": [
-        {"symbol": s, "name": p["name"], "shares": round(p["shares"], 6), "cost": round(p["cost"], 6),
-         "sellable": round(p["shares"] if _is_t0(s) else p["shares"] - p["bought_today"], 6),
-         "buy_ts": p["buy_ts"]}
-        for s, p in pos.items() if p["shares"] > 1e-9
-    ]}
+    out = []
+    for s, p in pos.items():
+        if p["shares"] <= 1e-9:
+            continue
+        # 视点扫描判断：结束日期之前（含当天）没有该股任何买入流水的，直接不返回该股持仓——
+        # 例：3-7 买入的个股，视点 3-6 时 orders 里查无买入记录，前端就不显示它的持仓。
+        # 截断重演已天然保证此不变量，这里钉成显式判断，防后续改动破坏该口径
+        if a is not None and not (p["buy_ts"] and p["buy_ts"] <= a):
+            continue
+        out.append({"symbol": s, "name": p["name"], "shares": round(p["shares"], 6), "cost": round(p["cost"], 6),
+                    "sellable": round(p["shares"] if _is_t0(s) else p["shares"] - p["bought_today"], 6),
+                    "buy_ts": p["buy_ts"]})
+    return {"holdings": out}
 
 
 @app.get("/api/orders")
-async def orders_get(scope: str = "hist"):
+async def orders_get(scope: str = "hist", as_of: str = ""):
+    # as_of：历史回放视点（同 /api/holdings）——订单列表与已实现收益都只含该时点前的流水：
+    # 回看18号之前的视点看不到18号下的单（及之后卖出落的袋）；realized 按视点重演推导
+    a = _norm_asof(as_of)
     con = _conn()
-    rows = con.execute(f"SELECT id, symbol, name, side, price, qty, ts FROM {_tbl(scope, 'orders')} ORDER BY ts, id").fetchall()
-    _, realized, _ = _replay(con, scope=scope)
+    sql = f"SELECT id, symbol, name, side, price, qty, ts FROM {_tbl(scope, 'orders')}"
+    args = ()
+    if a:
+        sql += " WHERE ts <= ?"
+        args = (a,)
+    rows = con.execute(sql + " ORDER BY ts, id", args).fetchall()
+    _, realized, _ = _replay(con, scope=scope, as_of=a)
     con.close()
     # 买入行 realized 为 null（收益由持仓浮动盈亏表达）；realized_total 供抽屉「全部收益=已实现+浮动」
     return {"orders": [{**dict(r), "realized": realized.get(r["id"])} for r in rows],
@@ -501,16 +594,29 @@ async def orders_post(payload: dict, scope: str = "hist"):
                              (sym,)).fetchone()
             name = o["name"] if o else sym
     if side == "sell":
-        p = _replay(con, scope=scope)[0].get(sym) or {"shares": 0.0, "bought_today": 0.0}
+        # 卖出上限按「该单业务时点 ts」重演校验（hist 气泡 ts=回放结束日期、手填补录历史单同理）：
+        # 不能按当前全量持仓算——回看视点时的持仓与现在不同，超视点持仓的卖出会插队卖超
+        p = _replay(con, scope=scope, as_of=ts)[0].get(sym) or {"shares": 0.0, "bought_today": 0.0}
         avail = p["shares"] if _is_t0(sym) else p["shares"] - p["bought_today"]
         if qty > avail + 1e-9:
             con.close()
             tip = "" if _is_t0(sym) or p["bought_today"] <= 1e-9 else "（A股当日买入次日可卖）"
-            raise HTTPException(400, f"卖出数量超过可卖，当前可卖 {avail:g}{tip}")
+            raise HTTPException(400, f"卖出数量超过可卖，{ts[:10]} 时可卖 {avail:g}{tip}")
+        old_conflict = _replay(con, scope=scope)[2]  # 存量卖超坏账（正常数据恒 None），供插入后对比
     with con:
-        cur = con.execute(f"INSERT INTO {_tbl(scope, 'orders')} (symbol, name, side, price, qty, ts) VALUES (?, ?, ?, ?, ?, ?)",
-                          (sym, name, side, price, qty, ts))
+        cur = con.execute(f"INSERT INTO {_tbl(scope, 'orders')} (symbol, name, side, price, qty, ts, created_at) "
+                          f"VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (sym, name, side, price, qty, ts, datetime.datetime.now().strftime(TS_FMT)))
     oid = cur.lastrowid
+    if side == "sell":
+        # 时序兜底：落在历史时点的卖出可能挤占其后已录卖出的份额（或自身卖超），插入后全量重演即现冲突——回滚拒单。
+        # 与插入前存量冲突比对 id，坏账不误伤新单；买入只会缓解冲突，无需兜底
+        conflict = _replay(con, scope=scope)[2]
+        if conflict and conflict["id"] != (old_conflict or {"id": None})["id"]:
+            with con:
+                con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,))
+            con.close()
+            raise HTTPException(400, f"卖出将超过持仓：{conflict['name']} {conflict['ts']} 的卖出将超过当时可卖，请调小数量")
     realized = _replay(con, scope=scope)[1].get(oid)
     con.close()
     return {"ok": True, "order": {"id": oid, "symbol": sym, "name": name, "side": side,
@@ -531,6 +637,21 @@ async def orders_delete(oid: int, scope: str = "hist"):
         con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,))
     con.close()
     return {"ok": True}
+
+
+@app.delete("/api/holdings/{symbol}")
+async def holdings_delete(symbol: str, scope: str = "hist"):
+    # 持仓无独立表（由流水重演推导），删除=清掉该标的全部买卖流水：买卖一并消失，重演不会
+    # 产生卖超坏账；卡片与流水独立不受影响；已实现收益随卖出流水一起消失（不分回放视点，全删）
+    con = _conn()
+    n = con.execute(f"SELECT COUNT(*) AS c FROM {_tbl(scope, 'orders')} WHERE symbol=?", (symbol,)).fetchone()["c"]
+    if not n:
+        con.close()
+        raise HTTPException(404, "该标的无买卖流水")
+    with con:
+        con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE symbol=?", (symbol,))
+    con.close()
+    return {"ok": True, "deleted": n}
 
 
 @app.get("/api/quotes")
@@ -567,3 +688,81 @@ async def cards_put(payload: dict, scope: str = "hist"):
                         [(i, s, n, p) for i, (s, n, p) in enumerate(rows)])
     con.close()
     return {"ok": True, "count": len(rows)}
+
+
+@app.delete("/api/cards/{symbol}")
+async def cards_delete(symbol: str, scope: str = "hist"):
+    # 卡片右上 ✕：后端直接删 cards/cards_live 表里该 symbol 这一行（hist/live 由 scope 映射）；
+    # 只删自选卡本身，该标的买卖流水不受影响（持仓/抽屉与卡片是两套独立数据）；
+    # 删中间行留下的 pos 空洞不影响 ORDER BY 排序，之后的全量保存或每日前置重排都会重编号
+    con = _conn()
+    with con:
+        cur = con.execute(f"DELETE FROM {_tbl(scope, 'cards')} WHERE symbol=?", (symbol,))
+    n = cur.rowcount
+    con.close()
+    if not n:
+        raise HTTPException(404, "卡片不存在")
+    return {"ok": True, "deleted": n}
+
+
+@app.get("/api/prefs")
+async def prefs_get():
+    # 全部界面偏好一次返回 {prefs: {key: value}}；空库返回空对象，前端按默认值渲染
+    con = _conn()
+    rows = con.execute("SELECT key, value FROM prefs").fetchall()
+    con.close()
+    return {"prefs": {r["key"]: r["value"] for r in rows}}
+
+
+@app.put("/api/prefs")
+async def prefs_put(payload: dict):
+    # 增量 upsert：只写传入的键，未传的键不动（「清除」= 写空串，同样落库防旧值复活）；
+    # 键限 ascii 字母数字下划线且长度<=32、值长度<=64：只收日期/页签这类短偏好，防误存大对象
+    items = []
+    for k, v in (payload.get("prefs") or {}).items():
+        k, v = str(k).strip(), str(v)
+        if k and len(k) <= 32 and len(v) <= 64 and all(c.isascii() and (c.isalnum() or c == "_") for c in k):
+            items.append((k, v))
+    con = _conn()
+    with con:
+        con.executemany("INSERT OR REPLACE INTO prefs (key, value) VALUES (?, ?)", items)
+    con.close()
+    return {"ok": True, "count": len(items)}
+
+
+@app.get("/api/account")
+async def account_get(scope: str = "hist", as_of: str = ""):
+    # 账户本金与可用资金：可用资金 = 本金 − 累计买入金额 + 累计卖出金额，由 orders 流水重演推导不落库（删单自动重算）
+    # as_of：历史回放视点——可用资金同样只算该时点前的流水（18号买的单在17号视点里还没扣钱）
+    a = _norm_asof(as_of)
+    s = "live" if scope == "live" else "hist"
+    con = _conn()
+    row = con.execute("SELECT capital FROM account WHERE scope=?", (s,)).fetchone()
+    sql = f"SELECT side, price, qty FROM {_tbl(scope, 'orders')}"
+    args = ()
+    if a:
+        sql += " WHERE ts <= ?"
+        args = (a,)
+    rows = con.execute(sql, args).fetchall()
+    con.close()
+    capital = row["capital"] if row else 0.0
+    cash = capital - sum(r["price"] * r["qty"] for r in rows if r["side"] == "buy") \
+        + sum(r["price"] * r["qty"] for r in rows if r["side"] == "sell")
+    return {"capital": capital, "cash": round(cash, 2)}
+
+
+@app.put("/api/account")
+async def account_put(payload: dict, scope: str = "hist"):
+    # 改本金：只写本金值，历史流水不动（可用资金随本金即时变化）
+    try:
+        capital = float(payload.get("capital"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "capital 必须是数字")
+    if not capital > 0:
+        raise HTTPException(400, "capital 必须大于 0")
+    s = "live" if scope == "live" else "hist"
+    con = _conn()
+    with con:
+        con.execute("INSERT OR REPLACE INTO account (scope, capital) VALUES (?, ?)", (s, capital))
+    con.close()
+    return {"ok": True, "capital": capital}
