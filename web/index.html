@@ -52,6 +52,7 @@
   .pop .prow { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
   .pop .prow label { width: 56px; flex: none; font-size: 12px; color: #666; }
   .pop .prow input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop .prow input.over { border-color: #e64340; }  /* 卖出数量超过可卖：红边警示 */
   .pop .step { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
     border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
   .pop .step:hover { background: #ffedd1; }
@@ -131,6 +132,7 @@
   @keyframes dslide { from { transform: translateX(100%); } }
   .dhd { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 8px; }
   .dhd .dtitle { font-size: 17px; font-weight: 700; color: #333; }
+  .dhd .dtitle i { font-style: normal; font-size: 12px; font-weight: 400; color: #999; margin-left: 8px; }
   .dhd .dclose { border: 0; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
   .dhd .dclose:hover { color: #333; }
   .dtabs { display: flex; gap: 24px; padding: 0 20px; border-bottom: 1px solid #eee; }
@@ -202,6 +204,7 @@
   .pop-live .prow-live { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
   .pop-live .prow-live label { width: 56px; flex: none; font-size: 12px; color: #666; }
   .pop-live .prow-live input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop-live .prow-live input.over { border-color: #e64340; }  /* 卖出数量超过可卖：红边警示 */
   .pop-live .step-live { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
     border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
   .pop-live .step-live:hover { background: #ffedd1; }
@@ -519,7 +522,14 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   const famtShow = p > 0 && q > 0 ? fmtAmt(p * q) : "—";
   const onPrice = v => setFprice(v);
   const onQty = v => setFqty(v);
-  const stepQty = d => onQty(String(Math.max(0, (parseFloat(fqty) || 0) + d * 100)));  // 数量加减，每次100
+  // 卖出数量上限=可卖数量：超出→数量框红边、加号禁用无法再加大（买入无上限；手输超限标红，提交时前端拦截）
+  const qmax = form === "sell" ? sellable : null;
+  const qOver = qmax != null && q > qmax;
+  // 数量加减，每次100；卖出时加号封顶可卖数量，不再放大
+  const stepQty = d => {
+    const nv = Math.max(0, (parseFloat(fqty) || 0) + d * 100);
+    onQty(String(d > 0 && qmax != null && nv > qmax ? qmax : nv));
+  };
   // —— 放大视图：独立大图弹层，取数与卡片同口径（day5 占位/分时 lineOpt/其余 kOpt），Esc/遮罩/✕ 关闭 ——
   useEffect(() => {
     if (!zoom) return;
@@ -554,6 +564,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   const submitTrade = async () => {
     const price = parseFloat(fprice), qty = parseFloat(fqty);
     if (!(price > 0) || !(qty > 0)) { setTerr("价格/数量需大于0"); return; }
+    if (form === "sell" && qty > sellable) { setTerr("卖出数量超过可卖 " + sellable); return; }
     setBusy(true); setTerr("");
     try {
       await sendJSON("/api/orders", "POST", { symbol, name, side: form, price, qty, ts: ftime });
@@ -597,8 +608,8 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
             <div className="prow">
               <label>数量</label>
               <button className="step" disabled=${busy} onClick=${() => stepQty(-1)}>−</button>
-              <input type="number" step="any" min="0" value=${fqty} onChange=${e => onQty(e.target.value)} placeholder="数量" />
-              <button className="step" disabled=${busy} onClick=${() => stepQty(1)}>＋</button>
+              <input type="number" step="any" min="0" max=${qmax != null ? String(qmax) : undefined} className=${qOver ? "over" : ""} value=${fqty} onChange=${e => onQty(e.target.value)} placeholder="数量" title=${qmax != null ? "最多可卖 " + qmax : undefined} />
+              <button className="step" disabled=${busy || (qmax != null && q >= qmax)} onClick=${() => stepQty(1)}>＋</button>
             </div>
             <div className="prow">
               <label>总价</label>
@@ -634,6 +645,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
 
 // 全部收益抽屉（hist）：右侧滑出。持仓/订单/已实现收益/可用资金均随回放视点截断（as_of）；
 // 持仓 tab 价格锚定视点：选了结束日期用截止日收盘（dayPx 与卡片同源），无则批量报价实时算
+// 标题右侧灰色小字显示筛选结束日期（即回放视点），未选结束日期时不显示
 function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTotal, account, onDelOrder, onDelHolding, onClose }) {
   const [tab, setTab] = useState("hold");
   useEffect(() => {  // Esc 关闭，同时锁住页面滚动
@@ -658,7 +670,7 @@ function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTot
   return html`<div className="drawer-mask" onClick=${onClose}>
     <div className="drawer" onClick=${e => e.stopPropagation()}>
       <div className="dhd">
-        <span className="dtitle">全部收益</span>
+        <span className="dtitle">全部收益${dend && html`<i>${dend}</i>`}</span>
         <button className="dclose" title="关闭" onClick=${onClose}>✕</button>
       </div>
       <div className="dtabs">
@@ -868,10 +880,19 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
     setFqty(side === "sell" ? String(sellable) : "100");
     setFtime(now);
   };
-  const stepQty = d => setFqty(v => String(Math.max(0, (parseFloat(v) || 0) + d * 100)));  // 数量加减，每次100
+  // 卖出数量上限=可卖数量：超出→数量框红边、加号禁用无法再加大（买入无上限；手输超限标红，提交时前端拦截）
+  const qmax = form === "sell" ? sellable : null;
+  const q = parseFloat(fqty);
+  const qOver = qmax != null && q > qmax;
+  // 数量加减，每次100；卖出时加号封顶可卖数量，不再放大
+  const stepQty = d => setFqty(v => {
+    const nv = Math.max(0, (parseFloat(v) || 0) + d * 100);
+    return String(d > 0 && qmax != null && nv > qmax ? qmax : nv);
+  });
   const submitTrade = async () => {
     const price = parseFloat(fprice), qty = parseFloat(fqty);
     if (!(price > 0) || !(qty > 0)) { setTerr("价格/数量需大于0"); return; }
+    if (form === "sell" && qty > sellable) { setTerr("卖出数量超过可卖 " + sellable); return; }
     setBusy(true); setTerr("");
     try {
       await sendJSON("/api/orders?scope=live", "POST", { symbol, name, side: form, price, qty, ts: ftime });
@@ -914,8 +935,8 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
           <div className="prow-live">
             <label>数量</label>
             <button className="step-live" disabled=${busy} onClick=${() => stepQty(-1)}>−</button>
-            <input type="number" step="any" min="0" value=${fqty} onChange=${e => setFqty(e.target.value)} placeholder="数量" />
-            <button className="step-live" disabled=${busy} onClick=${() => stepQty(1)}>＋</button>
+            <input type="number" step="any" min="0" max=${qmax != null ? String(qmax) : undefined} className=${qOver ? "over" : ""} value=${fqty} onChange=${e => setFqty(e.target.value)} placeholder="数量" title=${qmax != null ? "最多可卖 " + qmax : undefined} />
+            <button className="step-live" disabled=${busy || (qmax != null && q >= qmax)} onClick=${() => stepQty(1)}>＋</button>
           </div>
           ${terr && html`<span className="terr-live">${terr}</span>`}
           <div className="pact-live">
@@ -1223,15 +1244,18 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
 function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
   const [cards, setCards] = useState([]);  // 首屏卡片从后端 SQLite 加载，不再写死在页面里
   const applyCards = ns => { setCards(ns); saveCards(ns); };  // 所有增删改统一：更新界面并回写数据库
-  const loadCards = () => getJSON("/api/cards").then(d => setCards(d.cards || [])).catch(e => console.error("卡片加载失败", e));
+  const loadCards = () => getJSON("/api/cards" + (dend ? `?as_of=${encodeURIComponent(dend + " 23:59")}` : ""))
+    .then(d => setCards(d.cards || [])).catch(e => console.error("卡片加载失败", e));
   useEffect(() => { loadCards(); }, []);  // 首屏拉取
-  // 切回页面时重拉卡片：跨天后后端「买入次日前置」的新顺序无需手动刷新即呈现
-  // （卡片按 symbol 为 key 复用组件，图表取数不依赖顺序，重排只移动 DOM 不重载图；同日内重拉结果相同，无感）
+  useEffect(() => { loadCards(); }, [dend]);  // 切换视点后端按「视点日晚于买入日」重排：回放轴的第二天买入卡前置
+  // 切回页面时重拉卡片：跨真实天后后端（live 次日前置/hist 视点重排）的新顺序无需手动刷新即呈现；
+  // 依赖 [dend] 保证闭包里的 loadCards 带最新视点（effect [] 会捕获旧 dend 永远传首屏视点）
+  // （卡片按 symbol 为 key 复用组件，图表取数不依赖顺序，重排只移动 DOM 不重载图；同视点内重拉结果相同，无感）
   useEffect(() => {
     const onVis = () => { if (document.visibilityState === "visible") loadCards(); };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
-  }, []);
+  }, [dend]);
   // 顶栏选中态由各卡周期推导：全部一致亮对应档位，不一致（或空盘）亮「其他」
   const gperiod = cards.length > 0 && cards.every(c => c.period === cards[0].period) ? cards[0].period : "other";
   const setAllPeriod = p => { if (p !== "other") applyCards(cards.map(c => ({ ...c, period: p }))); };  // 「其他」为混合态指示，点击不强制切换

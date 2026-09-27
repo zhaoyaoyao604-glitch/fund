@@ -196,19 +196,45 @@ def _replay(con, exclude_id=None, scope="hist", as_of=None):
     return pos, realized, conflict
 
 
-def _promote_bought_cards(con, scope):
-    """买入次日卡片前置：每天首次取卡时，把「游标日(含)到昨天」有买入动作的卡片整体提到列表最前并落库，
-    多只命中按最后一笔买入动作时间降序（最新买的最前）；同一时刻录入的一批再按业务首笔买入时间升序、
-    录入先后升序排——与抽屉持仓列表（重演建仓序）完全一致，抽屉排第一的持仓卡即主页面第一张。
-    判定锚 created_at（真实下单时刻）而非业务 ts——hist 回放给历史日期的单，同样按实际操作的第二天前置；
-    只前置当前仍持仓的（买入后已清仓的不再置顶）。游标存 promo 表按 scope 各记一行（首次运行只记今天、
-    不追溯历史买入）；昨天没打开页面也无妨——下次打开时区间一并覆盖这段时间的新买入，晚开页同样补前置。"""
+def _promote_bought_cards(con, scope, as_of=None):
+    """买入后卡片前置，两视图口径分叉：
+    hist（历史模拟仓）视点驱动：模拟仓的买卖业务时间就是筛选截止日，与真实时钟无关——「买入后的第二天」
+    按回放轴判定（视点日晚于最后买入日）。每次取卡把仍持仓(_replay as_of 截断)且 last_buy 日期 < 视点日的
+    卡整体提到最前，按 last_buy DESC, first_buy ASC, last_id ASC（与抽屉建仓序一致，抽屉第一的持仓卡即首页第一张）；
+    视点未过买入日的不前置（当天买的不动），清仓的不置顶。promo 表 hist 行改存「上次重排的视点串」做视点内幂等：
+    同一视点重复取卡不重排，用户手动拖拽的顺序不被覆盖；切换视点（推进/回拨日期）才重算。hist 无视点不触发。
+    live（实时跟随仓）真实时钟驱动：每天首次取卡把「游标日(含)到昨天」created_at（真实下单时刻，锚业务 ts 会永不
+    命中）有买入且仍持仓的卡提到最前，游标 promo.last_date 记真实日期，每日幂等一次；昨天没开页面下次打开补前置。"""
+    if scope == "hist":
+        if not as_of:
+            return  # 历史仓买卖时间锚筛选截止日，没视点就没有「第二天」，不动 pos
+        row = con.execute("SELECT last_date FROM promo WHERE scope='hist'").fetchone()
+        if row and row["last_date"] == as_of:
+            return  # 该视点已重排过，幂等跳过
+        rows = con.execute(f"SELECT symbol, MAX(ts) AS last_buy, MIN(ts) AS first_buy, MAX(id) AS last_id "
+                           f"FROM {_tbl(scope, 'orders')} WHERE side='buy' GROUP BY symbol "
+                           f"HAVING substr(MAX(ts),1,10) < ? "
+                           f"ORDER BY last_buy DESC, first_buy ASC, last_id ASC", (as_of[:10],)).fetchall()
+        if rows:
+            held = {s for s, p in _replay(con, scope=scope, as_of=as_of)[0].items() if p["shares"] > 1e-9}
+            hit = [r["symbol"] for r in rows if r["symbol"] in held]
+            if hit:
+                cards = [r["symbol"] for r in
+                         con.execute(f"SELECT symbol FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()]
+                hs, cs = set(hit), set(cards)
+                ordered = [s for s in hit if s in cs] + [c for c in cards if c not in hs]
+                with con:
+                    con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
+        with con:
+            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES ('hist', ?)", (as_of,))
+        return
+    # ---- live：真实时钟游标 ----
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    row = con.execute("SELECT last_date FROM promo WHERE scope=?", (scope,)).fetchone()
+    row = con.execute("SELECT last_date FROM promo WHERE scope='live'").fetchone()
     last = row["last_date"] if row else ""
     if not last:  # 首次：只建游标，历史买入不触发
         with con:
-            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES (?, ?)", (scope, today))
+            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES ('live', ?)", (today,))
         return
     if last >= today:
         return  # 今天已处理，幂等跳过
@@ -230,7 +256,7 @@ def _promote_bought_cards(con, scope):
         with con:
             con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
     with con:
-        con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES (?, ?)", (scope, today))
+        con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES ('live', ?)", (today,))
 
 
 app = FastAPI()
@@ -517,9 +543,9 @@ async def search(q: str = Query(...)):
 
 
 @app.get("/api/cards")
-async def cards_get(scope: str = "hist"):
+async def cards_get(scope: str = "hist", as_of: str = ""):
     con = _conn()
-    _promote_bought_cards(con, scope)  # 买入次日优先前置：每天首次取卡时重排落库（游标内幂等）
+    _promote_bought_cards(con, scope, _norm_asof(as_of))  # hist 视点驱动/live 每日游标，函数注释有口径分叉
     rows = con.execute(f"SELECT symbol, name, period FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()
     con.close()
     return {"cards": [dict(r) for r in rows]}
