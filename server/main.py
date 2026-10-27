@@ -7,6 +7,7 @@ import datetime
 import json
 import math
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -126,6 +127,14 @@ def _init_db():
             con.execute("CREATE TABLE drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
                         "period TEXT NOT NULL DEFAULT 'day', kind TEXT NOT NULL CHECK(kind IN ('trend','h')), "
                         "pts TEXT NOT NULL, created TEXT NOT NULL)")
+    # 回测记录表：一次回测存一条快照（payload 为 /api/backtest 返回的 K线/均线/成交/资金曲线/统计 JSON）。
+    # 只服务「回测记录」展示，与 orders/orders_live 无关；同参数重复回测覆盖同一条，避免刷出一堆重复记录
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtests'").fetchone():
+        with con:
+            con.execute("CREATE TABLE backtests (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+                        "name TEXT NOT NULL, start TEXT NOT NULL DEFAULT '', end TEXT NOT NULL DEFAULT '', "
+                        "capital REAL NOT NULL, each REAL NOT NULL, created TEXT NOT NULL, payload TEXT NOT NULL)")
+            con.execute("CREATE INDEX idx_backtests_key ON backtests (symbol, start, end, capital, each)")
     con.close()
 
 
@@ -705,11 +714,14 @@ def bt_run(rows, ma3, capital, each):
             ptop, pbot, phgt = bt_box(rows[i - 1])
             tol = phgt * BT_PAR_TOL
             par = abs(top - ptop) <= tol and abs(bot - pbot) <= tol
-        # 卖出：① 箱体跌破前一日箱体底 ② 实体一半高度掉进 3 日线（实体中点 < MA3）
+        # 卖出：① 箱体跌破前一日箱体底 ② 箱体顶部没抬过前一日箱体顶（顶未抬高即不再上行）
+        # ③ 实体一半高度掉进 3 日线（实体中点 < MA3）；①③ 为原有口径，②为追加的顶未抬高清仓
         sold = ""
         if qty > 0 and i > 0 and not par:
             if bot < pbot:
                 sold = "broke"
+            elif top <= ptop:
+                sold = "ntop"
             elif m is not None and (top + bot) / 2 < m:
                 sold = "ma3"
         if sold:
@@ -723,8 +735,9 @@ def bt_run(rows, ma3, capital, each):
             realized_all += gain
             if gain > 0:
                 win += 1
-        # 买入：非平行日且 3 日线在实体底部之下（整根实体站在均线上方）→ 每次买 each 元；卖出当日不再买
-        elif not par and m is not None and m < bot and cash >= each:
+        # 买入：非平行日 + 3 日线在实体底部之下（整根实体站在均线上方）+ 实体底部高于前一日实体底部
+        # （箱体在抬高，未抬高即不买）→ 每次买 each 元；卖出当日不再买；区间首根无前日，不施加抬底条件
+        elif not par and m is not None and m < bot and (pbot is None or bot > pbot) and cash >= each:
             add = each / close
             trades.append({"date": date, "side": "buy", "price": round(close, 4),
                            "qty": round(add, 4), "amount": round(each, 2),
@@ -766,7 +779,8 @@ def bt_run(rows, ma3, capital, each):
 
 @app.get("/api/backtest")
 async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
-                   capital: float = 100000.0, each: float = 10000.0):
+                   capital: float = 100000.0, each: float = 10000.0,
+                   name: str = "", save: bool = True):
     if capital <= 0 or each <= 0:
         return {"error": "本金与单次买入金额需大于 0"}
     d = await kline(symbol, "day", 800, start, end)  # 复用日K取数口径（含均线预热与区间切片）
@@ -781,7 +795,97 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
     res.update({"symbol": symbol, "period": "day", "klines": rows,
                 "ma3": ind.get("ma3") or [],
                 "ind": {k: ind.get(k) or [] for k in ("ma3", "ma5", "ma85", "ma125")}})
+    if save:  # 每次回测自动落一条记录（供「回测记录」翻阅），落库失败不影响本次结果
+        st0 = res.get("stats") or {}
+        snap = {"symbol": symbol, "name": name or symbol,
+                "start": start or st0.get("first", ""), "end": end or st0.get("last", ""),
+                "capital": float(capital), "each": float(each),
+                # 快照只留画图要用的前5列（日期/开/收/高/低），去掉成交量缩体积
+                "klines": [[r[0], r[1], r[2], r[3], r[4]] for r in rows],
+                "ind": res["ind"], "trades": res["trades"], "nav": res["nav"], "stats": st0}
+        try:
+            rid, created = _bt_save(snap, json.dumps(snap, ensure_ascii=False))
+            res["rec"] = {"id": rid, "created": created}
+        except Exception:
+            res["rec"] = None
     return res
+
+
+# ---------- 回测记录：存/取快照供「回测记录」展示（只读自身表，与 orders/orders_live 无关） ----------
+def _bt_save(snap, payload):
+    # 同参数（标的+区间+本金+每次买入）重复回测覆盖上一条，避免记录列表被重复项刷满
+    ts = datetime.datetime.now().strftime(TS_FMT)
+    con = _conn()
+    try:
+        with con:
+            old = con.execute(
+                "SELECT id FROM backtests WHERE symbol=? AND start=? AND end=? AND capital=? AND each=? "
+                "ORDER BY id DESC LIMIT 1",
+                (snap["symbol"], snap["start"], snap["end"], snap["capital"], snap["each"])).fetchone()
+            if old:
+                con.execute("UPDATE backtests SET name=?, created=?, payload=? WHERE id=?",
+                            (snap["name"], ts, payload, old["id"]))
+                return old["id"], ts
+            cur = con.execute(
+                "INSERT INTO backtests (symbol, name, start, end, capital, each, created, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (snap["symbol"], snap["name"], snap["start"], snap["end"],
+                 snap["capital"], snap["each"], ts, payload))
+            return cur.lastrowid, ts
+    finally:
+        con.close()
+
+
+@app.get("/api/backtests")
+async def bt_records(limit: int = 200):
+    # 列表只返回摘要（payload 里的 K 线大 JSON 不返回），点开某条再取详情
+    con = _conn()
+    try:
+        rows = con.execute("SELECT id, symbol, name, start, end, capital, each, created, payload "
+                           "FROM backtests ORDER BY created DESC, id DESC LIMIT ?",
+                           (max(1, min(limit, 500)),)).fetchall()
+    finally:
+        con.close()
+    items = []
+    for r in rows:
+        try:
+            st = (json.loads(r["payload"]) or {}).get("stats") or {}
+        except Exception:
+            st = {}
+        items.append({"id": r["id"], "symbol": r["symbol"], "name": r["name"],
+                      "start": r["start"], "end": r["end"], "created": r["created"],
+                      "capital": r["capital"], "each": r["each"], "stats": st})
+    return {"items": items}
+
+
+@app.get("/api/backtests/{rid}")
+async def bt_record(rid: int):
+    con = _conn()
+    try:
+        r = con.execute("SELECT id, symbol, name, start, end, capital, each, created, payload "
+                        "FROM backtests WHERE id=?", (rid,)).fetchone()
+    finally:
+        con.close()
+    if not r:
+        return {"error": "记录不存在（可能已被删除）"}
+    try:
+        data = json.loads(r["payload"])
+    except Exception:
+        return {"error": "记录内容已损坏，删掉重新回测即可"}
+    return {"id": r["id"], "symbol": r["symbol"], "name": r["name"], "start": r["start"],
+            "end": r["end"], "capital": r["capital"], "each": r["each"],
+            "created": r["created"], "data": data}
+
+
+@app.delete("/api/backtests/{rid}")
+async def bt_record_del(rid: int):
+    con = _conn()
+    try:
+        with con:
+            n = con.execute("DELETE FROM backtests WHERE id=?", (rid,)).rowcount
+    finally:
+        con.close()
+    return {"deleted": n}
 
 
 @app.get("/api/minute")
@@ -1177,3 +1281,191 @@ async def account_put(payload: dict, scope: str = "hist"):
         con.execute("INSERT OR REPLACE INTO account (scope, capital) VALUES (?, ?)", (s, capital))
     con.close()
     return {"ok": True, "capital": capital}
+
+
+# ---------- 收盘前 10 分钟「买入信号」桌面提醒 ----------
+# 扫两张自选卡表（cards + cards_live）的并集，命中就弹 Windows 右下角通知。判定与回测同一套口径
+# （docs/回测规则口径.md）：今日实体（开→现价）底部在 MA3 之上，且今日箱体与前日不平行。
+# 盘中拿不到“今日收盘价”的终值，一律用实时报价现价近似，再用今开拼出今日实体；历史只取到
+# 昨日为止，不依赖上游是否已出当日 K 线（腾讯日K盘中给不给当日根都能算）。
+REMIND_BEFORE = 10  # 分钟：收盘前多久开扫（同时当作窗口长度，服务中途启动也不会漏）
+REMIND_CLOSE = {"a": (15, 0), "hk": (16, 0), "us": (16, 0)}  # 各市场收市时刻（当地时区）
+MKT_CN = {"a": "A股", "hk": "港股", "us": "美股"}
+_REMIND_DONE = {}  # 市场 -> 已提醒的当地日期：同一收盘窗口只弹一次
+_REMIND_BEAT = {"n": 0, "at": ""}  # 后台循环心跳：/api/notify/scan 回显，用于确认定时任务真的在跑
+TOAST_PS1 = Path(__file__).resolve().parent / "toast.ps1"
+
+
+def _beijing_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=8)
+
+
+def _nth_sunday(y, m, n):
+    d0 = datetime.date(y, m, 1)
+    return d0 + datetime.timedelta(days=(6 - d0.weekday()) % 7 + 7 * (n - 1))
+
+
+def _mkt_now(mkt):
+    # 该市场当地的当前时间：A股/港股与北京同区；美股按美东时令（夏令时 UTC-4 = 北京-12，冬令时北京-13）
+    bj = _beijing_now()
+    if mkt != "us":
+        return bj
+    dst = _nth_sunday(bj.year, 3, 2) <= bj.date() < _nth_sunday(bj.year, 11, 1)  # 3月第二个周日~11月第一个周日
+    return bj - datetime.timedelta(hours=12 if dst else 13)
+
+
+def _mkt_of(sym):
+    if sym.startswith(("sh", "sz")):
+        return "a"
+    if sym.startswith("hk"):
+        return "hk"
+    if sym.startswith("us"):
+        return "us"
+    return ""
+
+
+def _ts_day(s):
+    # 腾讯报价时间戳三种写法：A股 20261027161455 / 美股 2026-10-27 16:00:01 / 港股 2026/10/27 16:08:28
+    return "".join(c for c in (s or "") if c.isdigit())[:8]
+
+
+async def _qt_bulk(syms):
+    # 批量取现价/今开/时间戳：qt.gtimg.cn 逗号分隔一次拉完，请求数不随卡片数增长
+    out = {}
+    for i in range(0, len(syms), 40):
+        try:
+            txt = await get_text(QT + ",".join(syms[i:i + 40]), gbk=True)
+        except Exception:
+            continue
+        for line in txt.split(";"):
+            if "=" not in line or '"' not in line:
+                continue
+            var, _, rest = line.partition("=")
+            f = rest.split('"')[1].split("~")
+            if len(f) <= 30 or not f[3]:
+                continue
+            try:
+                out[var.strip().removeprefix("v_")] = {
+                    "price": float(f[3]),
+                    "open": float(f[5]) if f[5] not in ("", "0") else 0.0,
+                    "day": _ts_day(f[30]),
+                }
+            except ValueError:
+                pass
+    return out
+
+
+async def _signal_of(sym, mkt, q, sem):
+    # 单票判定：今日无报价（休市/停牌/上游未更新）直接跳过，不拿昨收冒充今日价
+    today = _mkt_now(mkt).date().strftime("%Y%m%d")
+    if not q or q["price"] <= 0 or q["day"] != today:
+        return None
+    async with sem:
+        d = await kline(sym, "day", 12, "", "")
+    rows = d.get("klines") or []
+    hist = [r for r in rows if r[0][:10].replace("-", "") < today]  # 只保留昨日及更早
+    if len(hist) < 2:
+        return None
+    px = q["price"]
+    op = q["open"] or float(hist[-1][2])  # 今开缺失（集合竞价前）退化用昨收
+    top, bot = max(op, px), min(op, px)
+    ptop, pbot, phgt = bt_box(hist[-1])
+    tol = phgt * BT_PAR_TOL
+    if phgt > 0 and abs(top - ptop) <= tol and abs(bot - pbot) <= tol:
+        return None  # 两日箱体平行：回测口径里不买不卖
+    if bot <= pbot:
+        return None  # 今日实体底未高于昨日实体底（箱体底部没抬高）：不买入，与回测同一口径
+    ma3 = (float(hist[-2][2]) + float(hist[-1][2]) + px) / 3  # MA3 = 前两日收盘 + 今日现价
+    if ma3 >= bot:
+        return None
+    return {"symbol": sym, "price": px, "ma3": round(ma3, 4), "bot": round(bot, 4)}
+
+
+async def scan_signals(mkts=None):
+    # 扫一遍自选卡，返回 {市场: [命中] }。mkts=None / 空集合 表示全市场
+    want = set(REMIND_CLOSE) if not mkts else set(mkts) & set(REMIND_CLOSE)
+    con = _conn()
+    rows = con.execute("SELECT symbol, name FROM cards UNION SELECT symbol, name FROM cards_live").fetchall()
+    con.close()
+    names = {r["symbol"]: r["name"] for r in rows}
+    syms = [s for s in names if _mkt_of(s) in want]
+    if not syms:
+        return {}
+    qs = await _qt_bulk(syms)
+    sem = asyncio.Semaphore(3)  # 限并发：37 卡同时打上游会触发腾讯 WAF
+    res = await asyncio.gather(*(_signal_of(s, _mkt_of(s), qs.get(s), sem) for s in syms),
+                               return_exceptions=True)
+    out = {}
+    for s, r in zip(syms, res):
+        if isinstance(r, dict):
+            r["name"] = names.get(s, "")
+            r["market"] = _mkt_of(s)
+            out.setdefault(_mkt_of(s), []).append(r)
+    return out
+
+
+def _toast(title, body):
+    # 零依赖桌面通知：调 toast.ps1（纯 ASCII，中文走命令行参数）
+    try:
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-File", str(TOAST_PS1), "-Title", title, "-Body", body],
+                         creationflags=0x08000000)  # CREATE_NO_WINDOW：不闪黑框
+    except Exception:
+        pass
+
+
+def push_hits(hits, force=False):
+    # 命中列表 → 一条通知（最多列 4 只，其余并成“等 N 只”）。force=手动测试时无命中也给回执
+    flat = [h for v in hits.values() for h in v]
+    if not flat:
+        if force:
+            _toast("买入信号 · 无命中", "当前没有自选票满足 MA3 箱体买入条件")
+        return 0
+    lines = [f"{h['name'] or h['symbol']} {h['price']:.2f}" for h in flat[:4]]
+    if len(flat) > 4:
+        lines.append(f"等共 {len(flat)} 只")
+    _toast(f"买入信号 · {len(flat)} 只", "\n".join(lines))
+    return len(flat)
+
+
+def _remind_due(mkt):
+    lt = _mkt_now(mkt)
+    if lt.weekday() >= 5:
+        return False  # 周末直接跳过（节假日靠“今日无报价”判定）
+    ch, cm = REMIND_CLOSE[mkt]
+    t0 = ch * 60 + cm - REMIND_BEFORE
+    cur = lt.hour * 60 + lt.minute
+    return t0 <= cur < t0 + REMIND_BEFORE and _REMIND_DONE.get(mkt) != lt.date().isoformat()
+
+
+async def _remind_loop():
+    # 每 20 秒醒一次：落在某市场的收盘前窗口里就扫该市场并弹通知，弹过当天不再弹
+    while True:
+        try:
+            for mkt in list(REMIND_CLOSE):
+                if not _remind_due(mkt):
+                    continue
+                hits = await scan_signals({mkt})
+                _REMIND_DONE[mkt] = _mkt_now(mkt).date().isoformat()
+                push_hits(hits)
+        except Exception:
+            pass  # 提醒属旁路功能，任何异常都不能影响行情主链路
+        _REMIND_BEAT["n"] += 1
+        _REMIND_BEAT["at"] = _beijing_now().strftime(TS_FMT)
+        await asyncio.sleep(20)
+
+
+@app.on_event("startup")
+async def _start_remind_loop():
+    asyncio.create_task(_remind_loop())
+
+
+@app.get("/api/notify/scan")
+async def notify_scan(market: str = "all"):
+    # 手动测试：立刻跑一遍扫描并弹通知（无命中也会弹一条回执，用于验证通知通道）
+    hits = await scan_signals(None if market in ("", "all") else {market})
+    n = push_hits(hits, force=True)
+    flat = [h for v in hits.values() for h in v]
+    return {"count": n, "hits": flat, "heartbeat": dict(_REMIND_BEAT),
+            "scanned": list(REMIND_CLOSE if market in ("", "all") else {market} & set(REMIND_CLOSE))}
+

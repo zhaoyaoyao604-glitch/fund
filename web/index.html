@@ -315,6 +315,42 @@
   .btph { color: var(--tx-4); font-size: 13px; padding: 26px 0; text-align: center; }
   .btwarn { color: var(--amber); font-size: 12px; padding: 4px 0; }
   .bterr { color: var(--up); font-size: 12px; padding: 4px 0; }
+  .btrec { border: 1px solid #f99502; background: transparent; color: #f99502; border-radius: 4px; padding: 4px 14px;
+    font-size: 13px; cursor: pointer; }
+  .btrec:hover { background: var(--bg-accent-weak); }
+  /* 回测记录弹窗：左侧竖向导航逐条列出历史回测，右侧看选中那条的票/区间/回测时间 + K线买卖点 */
+  .btrmask { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,.6); display: flex;
+    align-items: center; justify-content: center; }
+  .btrpanel { background: var(--bg-card); border-radius: 10px; width: min(1180px, 96vw); height: min(820px, 92vh);
+    display: flex; flex-direction: column; box-shadow: 0 10px 36px rgba(0,0,0,.75); }
+  .btrhd { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: var(--bd-3); }
+  .btrhd b { font-size: 15px; color: var(--tx-1); }
+  .btrhd i { font-size: 12px; color: var(--tx-4); font-style: normal; }
+  .btrclose { margin-left: auto; border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px;
+    cursor: pointer; font-size: 12px; padding: 2px 9px; align-self: center; }
+  .btrclose:hover { background: #e64340; color: #fff; }
+  .btrbody { flex: 1; min-height: 0; display: flex; }
+  .btrnav { width: 272px; flex: 0 0 272px; border-right: var(--bd-3); overflow-y: auto; padding: 8px; text-align: left; }
+  .btrnavhd { font-size: 12px; color: var(--tx-5); padding: 2px 6px 8px; }
+  .btritem { display: block; width: 100%; text-align: left; border: 1px solid transparent; background: transparent;
+    color: var(--tx-2); border-radius: 6px; padding: 8px 10px; cursor: pointer; margin-bottom: 4px; font-size: 12px;
+    line-height: 1.6; }
+  .btritem:hover { background: var(--bg-soft); }
+  .btritem.on { background: var(--bg-accent-weak); border-color: #8a6a30; }
+  .btritem b { display: block; font-size: 13px; font-weight: 600; color: var(--tx-1); margin-bottom: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btritem.on b { color: #f99502; }
+  .btritem em { font-style: normal; color: var(--tx-5); }
+  .btrpct { float: right; font-weight: 700; }
+  .btrdet { flex: 1; min-width: 0; overflow-y: auto; padding: 10px 16px 16px; }
+  .btrinfo { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; font-size: 13px;
+    color: var(--tx-2); padding-bottom: 6px; }
+  .btrinfo b { color: var(--tx-1); margin-left: 6px; }
+  .btrtitle { font-size: 15px; color: var(--tx-1); font-weight: 700; }
+  .btrchart { width: 100%; height: 470px; }
+  .btrdel { border: var(--bd-1); background: transparent; color: var(--tx-3); border-radius: 4px;
+    font-size: 12px; padding: 2px 8px; cursor: pointer; margin-left: auto; }
+  .btrdel:hover { border-color: #e64340; color: #e64340; }
   /* 全部收益抽屉：右侧滑出、页面不变暗；点抽屉外/×/Esc 关闭 */
   .drawer-mask { position: fixed; inset: 0; z-index: 40; }
   .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: var(--bg-card);
@@ -1015,20 +1051,27 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
       .then(d => setLines(v => v.map(x => x.id === id ? d.item : x)))
       .catch(e => { setLines(v => v.slice()); throw e; }),  // 失败：换新数组触发按原线重绘（回滚）
   };
+  // 行情数据短缓存：只是换了主题时（参数没变）直接拿上一次的数据重画，不重打一轮上游请求
+  //（37 张卡同时重取会把后端/上游打满，实测切主题后整屏 Failed to fetch）
+  const dataRef = useRef({ key: "", data: null });
   useEffect(() => {
     const chart = echarts.init(ref.current, theme === "dark" ? "dark" : null);  // 亮色用 ECharts 默认主题，暗色用内置 dark（坐标轴/分割线自动跟色）
     let dead = false;
-    setErr(""); setLoading(true); setDayPx(null);
+    const key = `${symbol}|${period}|${dstart}|${dend}`;
+    const hit = dataRef.current.key === key ? dataRef.current.data : null;
+    setErr(""); setLoading(!hit);
+    if (!hit) setDayPx(null);
     (async () => {
       try {
         if (period === "day5") throw new Error("5日待接入(东财 trends2)");
+        const d = hit || await getJSON(period === "min"
+          ? `/api/minute?symbol=${symbol}`
+          : `/api/kline?symbol=${symbol}&period=${period}&limit=300${(dstart || dend) ? `&start=${dstart}&end=${dend}` : ""}`);
+        dataRef.current = { key, data: d };
         if (period === "min") {
-          const d = await getJSON(`/api/minute?symbol=${symbol}`);
           const pts = (d.points || []).map(s => { const a = s.split(" "); return [a[0], +a[1]]; });
           chart.setOption(lineOpt(pts, +((d.quote || [])[4])), true);  // quote[4]=昨收
         } else {
-          const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
-          const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
           chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
           const ctl = createDrawings(chart, drawApi);
           ctlRef.current = ctl;
@@ -1438,20 +1481,27 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
       .then(d => setLines(v => v.map(x => x.id === id ? d.item : x)))
       .catch(e => { setLines(v => v.slice()); throw e; }),  // 失败：换新数组触发按原线重绘（回滚）
   };
+  // 行情数据短缓存：只是换了主题时（参数没变）直接拿上一次的数据重画，不重打一轮上游请求
+  //（37 张卡同时重取会把后端/上游打满，实测切主题后整屏 Failed to fetch）
+  const dataRef = useRef({ key: "", data: null });
   useEffect(() => {
     const chart = echarts.init(ref.current, theme === "dark" ? "dark" : null);  // 亮色用 ECharts 默认主题，暗色用内置 dark（坐标轴/分割线自动跟色）
     let dead = false;
-    setErr(""); setLoading(true); setDayPx(null);
+    const key = `${symbol}|${period}|${dstart}|${dend}`;
+    const hit = dataRef.current.key === key ? dataRef.current.data : null;
+    setErr(""); setLoading(!hit);
+    if (!hit) setDayPx(null);
     (async () => {
       try {
         if (period === "day5") throw new Error("5日待接入(东财 trends2)");
+        const d = hit || await getJSON(period === "min"
+          ? `/api/minute?symbol=${symbol}`
+          : `/api/kline?symbol=${symbol}&period=${period}&limit=300${(dstart || dend) ? `&start=${dstart}&end=${dend}` : ""}`);
+        dataRef.current = { key, data: d };
         if (period === "min") {
-          const d = await getJSON(`/api/minute?symbol=${symbol}`);
           const pts = (d.points || []).map(s => { const a = s.split(" "); return [a[0], +a[1]]; });
           chart.setOption(lineOpt(pts, +((d.quote || [])[4])), true);  // quote[4]=昨收
         } else {
-          const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
-          const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
           chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
           const ctl = createDrawings(chart, drawApi);
           ctlRef.current = ctl;
@@ -2035,6 +2085,112 @@ function btCalcHold(rows) {
   };
 }
 
+// ---------- 回测记录（左导航 + 右详情）----------
+// 后端每次 /api/backtest 成功都会自动存一份快照（backtests 表）；这里左边竖着列历史回测，
+// 右边看选中那条的票、区间、回测时间与「K线 + 买卖点」，图直接复用 btKOpt，口径跟回测弹窗完全一致。
+function BtHistory({ onClose, theme }) {
+  const [items, setItems] = useState(null);   // null=列表加载中；[]=暂无记录
+  const [cur, setCur] = useState(null);       // 选中记录 id
+  const [rec, setRec] = useState(null);       // 选中记录详情 {id,name,symbol,start,end,created,data}
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const refK = useRef(null);
+  useEffect(() => {  // 每次打开都重拉列表（刚跑完的回测会带上）
+    let dead = false;
+    (async () => {
+      try {
+        const d = await getJSON("/api/backtests");
+        if (dead) return;
+        const list = d.items || [];
+        setItems(list);
+        if (list.length) setCur(list[0].id);  // 默认选最新一条
+      } catch (e) { if (!dead) { setItems([]); setErr(String(e.message || e)); } }
+    })();
+    return () => { dead = true; };
+  }, []);
+  useEffect(() => {  // 选中项变化 → 取该条快照
+    if (!cur) return;
+    let dead = false;
+    setBusy(true); setErr("");
+    (async () => {
+      try {
+        const d = await getJSON(`/api/backtests/${cur}`);
+        if (!dead) setRec(d);
+      } catch (e) { if (!dead) { setRec(null); setErr(String(e.message || e)); } }
+      finally { if (!dead) setBusy(false); }
+    })();
+    return () => { dead = true; };
+  }, [cur]);
+  useEffect(() => {  // 详情容器随数据渲染才存在，故依赖 rec
+    if (!rec || !refK.current) return;
+    const ch = echarts.init(refK.current, theme === "dark" ? "dark" : null);
+    ch.setOption(btKOpt(rec.data), true);
+    const onRs = () => ch.resize();
+    window.addEventListener("resize", onRs);
+    return () => { window.removeEventListener("resize", onRs); ch.dispose(); };
+  }, [rec, theme]);
+  const del = async (ev, id) => {
+    ev.stopPropagation();
+    if (!window.confirm("删掉这条回测记录？")) return;
+    try {
+      await sendJSON(`/api/backtests/${id}`, "DELETE");
+      const list = (items || []).filter(x => x.id !== id);
+      setItems(list);
+      if (cur === id) { setRec(null); setCur(list.length ? list[0].id : null); }
+    } catch (e2) { setErr(String(e2.message || e2)); }
+  };
+  const sg = v => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}`);
+  const st = rec ? (rec.data.stats || {}) : null;
+  return html`<div className="btrmask" onClick=${ev => { ev.stopPropagation(); onClose(); }}>
+    <div className="btrpanel" onClick=${ev => ev.stopPropagation()}>
+      <div className="btrhd">
+        <b>回测记录</b><i>左边选一条，右边看该次回测的票、区间、回测时间与 K 线买卖点</i>
+        <button className="btrclose" title="关闭" onClick=${onClose}>✕</button>
+      </div>
+      <div className="btrbody">
+        <div className="btrnav">
+          <div className="btrnavhd">${items ? `共 ${items.length} 条` : "加载中…"}${items && items.length ? "（新的在最上）" : ""}</div>
+          ${(items || []).map(it => html`<button key=${it.id} className=${"btritem" + (it.id === cur ? " on" : "")}
+            onClick=${() => setCur(it.id)}>
+            <b>${it.name} <em>${it.symbol}</em></b>
+            <span>${it.start} ~ ${it.end}
+              <span className="btrpct" style=${{ color: (it.stats.total || 0) >= 0 ? "var(--up)" : "var(--dn)" }}>${sg(it.stats.total)}%</span>
+            </span>
+            <span><em>回测于 ${it.created}</em></span>
+          </button>`)}
+        </div>
+        <div className="btrdet">
+          ${err && html`<div className="bterr">${err}</div>`}
+          ${!err && items && items.length === 0 && html`<div className="btph">还没有回测记录：关掉这里点「开始回测」跑一次，就会自动记一条</div>`}
+          ${!rec && !err && items && items.length > 0 && html`<div className="btph">读取记录中…</div>`}
+          ${rec && html`<div>
+            <div className="btrinfo">
+              <span className="btrtitle">${rec.name} <span style=${{ opacity: .5, fontSize: 12, fontWeight: 400 }}>${rec.symbol}</span></span>
+              <span>区间<b>${st.first || rec.start} ~ ${st.last || rec.end}</b></span>
+              <span>回测时间<b>${rec.created}</b></span>
+              <span>本金<b>${rec.capital}</b></span>
+              <span>每次买入<b>${rec.each}</b></span>
+              <button className="btrdel" onClick=${ev => del(ev, rec.id)}>删除这条</button>
+            </div>
+            <div className="btstat">
+              <span>累计收益<b className=${(st.total || 0) >= 0 ? "up" : "dn"}>${sg(st.total)}%</b></span>
+              <span>期末资金<b className=${(st.total || 0) >= 0 ? "up" : "dn"}>${(st.end || 0).toFixed(2)}</b></span>
+              <span>最大回撤<b className="dn">${(st.mdd || 0).toFixed(2)}%</b></span>
+              <span>买入<b>${st.buys || 0}</b>次</span>
+              <span>卖出<b>${st.sells || 0}</b>次</span>
+              ${st.winrate != null && html`<span>胜率<b>${st.winrate}%</b></span>`}
+              <span>K线<b>${(rec.data.klines || []).length}</b>根</span>
+              ${busy && html`<span style=${{ color: "var(--tx-5)" }}>读取中…</span>`}
+            </div>
+            <div className="btrchart" ref=${refK}></div>
+            <div className="btrule">图上 B=买入、S=卖出；均线与成交口径同「回测」弹窗：箱体=开→收实体，MA3 低于实体底且实体底高于前日实体底才买；跌破前日箱体、箱体顶部未高于前日顶部、或实体一半落进 MA3 则清仓，按收盘价成交、不计手续费。</div>
+          </div>`}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function Backtest({ cards, defStart, defEnd, onClose, theme }) {
   const [sym, setSym] = useState(null);          // 已选标的 {symbol, name}（只选一只）
   const [q, setQ] = useState("");
@@ -2046,14 +2202,15 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [res, setRes] = useState(null);          // {sym, data, warn}；data 为 /api/backtest 全量返回
+  const [showRec, setShowRec] = useState(false); // 回测记录弹窗（盖在回测弹窗之上）
   const refK = useRef(null);                     // K线图容器（带买卖点）
   const refNav = useRef(null);                   // 资金曲线容器
   const seq = useRef(0);
-  useEffect(() => {  // Esc 关闭
-    const onKey = ev => ev.key === "Escape" && onClose();
+  useEffect(() => {  // Esc 关闭（回测记录开着时只关记录层，不连回测一起关）
+    const onKey = ev => ev.key === "Escape" && !showRec && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, showRec]);
   useEffect(() => {  // 输入即搜索（300ms 防抖，与顶栏搜索同款）；上游偶发失败保留上次结果
     const t = setTimeout(async () => {
       const term = q.trim();
@@ -2092,7 +2249,8 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
     try {
       // 规则全部落在后端 /api/backtest（与实盘流水完全隔离），前端只管取回来画图
       const dr = `${s ? `&start=${s}` : ""}${e ? `&end=${e}` : ""}`;
-      const d = await getJSON(`/api/backtest?symbol=${sym.symbol}&capital=${cap}&each=${ea}${dr}`);
+      // name 一并传给后端，存进回测记录（记录列表显示名称而不是只有代码）
+      const d = await getJSON(`/api/backtest?symbol=${sym.symbol}&name=${encodeURIComponent(sym.name)}&capital=${cap}&each=${ea}${dr}`);
       const rows = d.klines || [];
       if (rows.length < 2) throw new Error("区间内交易日不足（落在周末/停牌或超出行情源可回溯范围），请换个区间");
       setRes({
@@ -2138,6 +2296,7 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
           <input value=${each} onChange=${ev => setEach(ev.target.value)} style=${{ width: 90 }} />
         </span>
         <button className="btgo" disabled=${busy} onClick=${run}>${busy ? "回测中…" : "开始回测"}</button>
+        <button className="btrec" onClick=${() => setShowRec(true)}>回测记录</button>
       </div>
       <div className="btbody">
         ${cards.length > 0 && html`<div className="btcards">
@@ -2173,15 +2332,16 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
               <span>${t.qty}</span>
               <span>${t.amount}</span>
               <span className=${t.realized == null ? "" : (t.realized >= 0 ? "up" : "dn")}>${t.realized == null ? "—" : sg(t.realized)}</span>
-              <span className="btrs">${t.side === "buy" ? "MA3 在实体下方" : (t.reason === "broke" ? "跌破前日箱体" : "实体一半落进 MA3")}</span>
+              <span className="btrs">${t.side === "buy" ? "MA3 在实体下方" : (t.reason === "broke" ? "跌破前日箱体" : (t.reason === "ntop" ? "箱体顶部未抬高" : "实体一半落进 MA3"))}</span>
             </div>`)}
           </div>`}
           <div className="btnavhd">资金曲线（现金 + 持仓市值）</div>
           <div className="btnavchart" ref=${refNav}></div>
-          <div className="btrule">口径：箱体=当日开→收实体；3 日线低于实体底部才买（每次 ${each || "10000"} 元）；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。</div>
+          <div className="btrule">口径：箱体=当日开→收实体；3 日线低于实体底部、且实体底部高于前一日实体底部才买（每次 ${each || "10000"} 元）；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体、箱体顶部未高于前日顶部或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。</div>
         </div>`}
       </div>
     </div>
+    ${showRec && html`<${BtHistory} onClose=${() => setShowRec(false)} theme=${theme} />`}
   </div>`;
 }
 
