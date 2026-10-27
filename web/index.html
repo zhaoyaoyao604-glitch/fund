@@ -8,60 +8,181 @@
 <script src="vendor/react-dom.min.js"></script>
 <script src="vendor/htm.umd.js"></script>
 <script src="vendor/echarts.min.js"></script>
-<style>
-  body { margin: 0; background: #f2f3f5; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+<style>  /* ===== 主题调色板：深色为默认(:root)，亮色由 html.light 覆盖整套变量 =====
+     切换开关只做一件事：给 <html> 加/去掉 light 类名，其余样式全部读变量 */
+  :root {
+    color-scheme: dark;
+    --bd-dn: #2fcf98;
+    --bd-1: 1px solid #3a3f47;
+    --bd-up: 1px solid #ff5f5f;
+    --bd-2: 1px solid #343941;
+    --bd-3: 1px solid #2b2f36;
+    --bd-amber: 1px solid #8a6a30;
+    --bd-4: 1px solid #2b2f36;
+    --bd-5: 1px solid #262a30;
+    --bd-tip: 1px solid #7a6420;
+    --bd-1c: #3a3f47;
+    --bd-up-c: #ff5f5f;
+    --bd-amber-c: #8a6a30;
+    --bg-dn-weak: rgba(47,207,152,.14);
+    --bg-soft: #262a30;
+    --bg-page: #121317;
+    --bg-soft2: #262a30;
+    --bg-up-weak: rgba(255,95,95,.14);
+    --bg-accent-weak2: rgba(249,149,2,.22);
+    --bg-card: #1c1f24;
+    --bg-accent-weak: rgba(249,149,2,.12);
+    --bg-tip: rgba(48,42,26,.96);
+    --sh-flag: 0 0 0 1px rgba(255,255,255,.14);
+    --sh-card: 0 1px 4px rgba(0,0,0,.5);
+    --sh-pop: 0 2px 8px rgba(0,0,0,.6);
+    --sh-pop2: 0 6px 20px rgba(0,0,0,.6);
+    --sh-drawer: -8px 0 28px rgba(0,0,0,.6);
+    --dn: #2fcf98;
+    --tx-1: #e6e8ec;
+    --tx-2: #b0b4bc;
+    --tx-3: #949aa3;
+    --tx-4: #8a9099;
+    --tx-5: #767c85;
+    --amber: #e8b04a;
+    --tx-6: #6b717a;
+    --tx-7: #63686f;
+    --tx-9: #5a6068;
+    --tx-8: #5d626a;
+    --link: #ffab2e;
+    --up: #ff5f5f;
+    --bg-field: #22262c;
+    --bd-field: #3a3f47;
+    /* 图表专字色（K线/均线/MACD/缩放条/画线）：ECharts 读不到 CSS，由 chartPal() 取这些变量 */
+    --dif: #c8ccd4;
+    --ma3: #e6a23c;
+    --ma5: #409eff;
+    --ma85: #3ecf8e;
+    --ma125: #a78bfa;
+    --draw: rgba(255,196,0,.85);
+    --draw-sel: #e8590c;
+    --zoom-border: #343941;
+    --zoom-bg: #22262c;
+    --zoom-tx: #8a9099;
+    --zoom-line: #4a4f58;
+    --zoom-area: #2a2e35;
+    --zoom-sel-line: #8a6a30;
+    --zoom-filler: rgba(249,149,2,.18);
+  }
+  html.light {
+    color-scheme: light;
+    --bd-dn: #1fa37a;
+    --bd-1: 1px solid #ddd;
+    --bd-up: 1px solid #e64340;
+    --bd-2: 1px solid #ececf0;
+    --bd-3: 1px solid #eee;
+    --bd-amber: 1px solid #f0b75c;
+    --bd-4: 1px solid #f0f0f2;
+    --bd-5: 1px solid #f5f6f7;
+    --bd-tip: 1px solid #ffd666;
+    --bd-1c: #d9d9de;
+    --bd-up-c: #e64340;
+    --bd-amber-c: #f0b75c;
+    --bg-dn-weak: #e8f7f0;
+    --bg-soft: #f0f0f2;
+    --bg-page: #f2f3f5;
+    --bg-soft2: #f7f7f8;
+    --bg-up-weak: #fdecec;
+    --bg-accent-weak2: #ffedd1;
+    --bg-card: #fff;
+    --bg-accent-weak: #fff7ea;
+    --bg-tip: rgba(255,248,225,.96);
+    --sh-flag: 0 0 0 1px rgba(0,0,0,.1);
+    --sh-card: 0 1px 4px rgba(0,0,0,.08);
+    --sh-pop: 0 2px 8px rgba(0,0,0,.15);
+    --sh-pop2: 0 6px 20px rgba(0,0,0,.15);
+    --sh-drawer: -8px 0 28px rgba(0,0,0,.16);
+    --dn: #1fa37a;
+    --tx-1: #333;
+    --tx-2: #666;
+    --tx-3: #888;
+    --tx-4: #999;
+    --tx-5: #aaa;
+    --amber: #b97c00;
+    --tx-6: #bbb;
+    --tx-7: #c0c0c0;
+    --tx-9: #c2c2c8;
+    --tx-8: #c8c8cc;
+    --link: #d46b08;
+    --up: #e64340;
+    --bg-field: #fff;
+    --bd-field: #ddd;
+    --dif: #333;
+    --ma85: #2f855a;
+    --ma125: #805ad5;
+    --draw: rgba(212,136,6,.9);
+    --zoom-border: #ececf0;
+    --zoom-bg: #fafafb;
+    --zoom-tx: #999;
+    --zoom-line: #dcdce0;
+    --zoom-area: #f2f2f5;
+    --zoom-sel-line: #f0b75c;
+  }
+  input, textarea, select { background: var(--bg-field); color: var(--tx-1); border-color: var(--bd-field); }
+  input::placeholder { color: var(--tx-6); }
+
+
+  body { margin: 0; background: var(--bg-page); font-family: system-ui, "Microsoft YaHei", sans-serif; }
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px; }
   @media (min-width: 1600px) { .grid { grid-template-columns: repeat(4, 1fr); } }
   @media (max-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-  .card { position: relative; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 8px; }
+  .card { position: relative; background: var(--bg-card); border-radius: 8px; box-shadow: var(--sh-card); padding: 8px; }
   .grip { cursor: move; }
-  .del { position: absolute; top: 6px; right: 38px; border: 0; background: #f0f0f2; color: #888; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
+  .del { position: absolute; top: 6px; right: 38px; border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
   .del:hover { background: #e64340; color: #fff; }
   .zbtn { right: 8px; }  /* 放大icon：按参考图位于删除icon右侧，删除居左放大居右（del宽约22px，间距8px→right38） */
   .zbtn:hover { background: #f99502; color: #fff; }
   .zmask { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
-  .zpanel { position: relative; background: #fff; border-radius: 10px; width: min(1100px, 94vw); height: min(720px, 88vh); display: flex; flex-direction: column; padding: 10px 14px 14px; }
+  .zpanel { position: relative; background: var(--bg-card); border-radius: 10px; width: min(1960px, 90vw); height: min(880px, 80vh); display: flex; flex-direction: column; padding: 10px 14px 14px; }
   .zhd { display: flex; align-items: baseline; gap: 10px; padding-bottom: 8px; }
   .zhd b { font-size: 15px; }
-  .zclose { margin-left: auto; border: 0; background: #f0f0f2; color: #888; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 2px 8px; align-self: center; }
+  .zclose { margin-left: auto; border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px; cursor: pointer; font-size: 12px; padding: 2px 8px; align-self: center; }
   .zclose:hover { background: #e64340; color: #fff; }
+  .zdelcard { border: 0; background: var(--bg-up-weak); color: var(--up); border-radius: 4px; cursor: pointer;
+    font-size: 12px; padding: 2px 8px; margin-left: 8px; align-self: center; }
+  .zdelcard:hover { background: #e64340; color: #fff; }
   .zchart { flex: 1; min-height: 0; }
-  .znote { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #999; font-size: 13px; }
+  .znote { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--tx-4); font-size: 13px; }
   .hd { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 4px; font-size: 13px; }
   .hd .chg { font-size: 12px; margin-left: 6px; font-weight: 600; }
-  .px { font-size: 15px; font-weight: 700; color: #333; }
+  .px { font-size: 15px; font-weight: 700; color: var(--tx-1); }
   .hrow2 { display: flex; justify-content: space-between; align-items: baseline; width: 100%; }
-  .hold { font-size: 12px; color: #999; }
+  .hold { font-size: 12px; color: var(--tx-4); }
   .hold b { font-weight: 700; margin: 0 3px 0 1px; }
-  .flag { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: 0 0 0 1px rgba(0,0,0,.1); }
+  .flag { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: var(--sh-flag); }
   /* 卡片交易行：买入红描边/卖出绿描边，无持仓或A股当日买入时卖出灰掉；点按钮弹出买卖气泡 */
   .trade { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 2px; }
-  .tbn { border: 1px solid #e64340; color: #e64340; background: #fff; border-radius: 4px; padding: 2px 12px;
+  .tbn { border: var(--bd-up); color: var(--up); background: var(--bg-card); border-radius: 4px; padding: 2px 12px;
     font-size: 12px; cursor: pointer; white-space: nowrap; transition: background-color .15s ease; }
-  .tbn:hover { background: #fdecec; }
-  .tbn.sell { border-color: #1fa37a; color: #1fa37a; }
-  .tbn.sell:hover { background: #e8f7f0; }
-  .tbn[disabled] { border-color: #d9d9de; color: #c2c2c8; background: #f7f7f8; cursor: not-allowed; }
+  .tbn:hover { background: var(--bg-up-weak); }
+  .tbn.sell { border-color: var(--bd-dn); color: var(--dn); }
+  .tbn.sell:hover { background: var(--bg-dn-weak); }
+  .tbn[disabled] { border-color: var(--bd-1c); color: var(--tx-9); background: var(--bg-soft2); cursor: not-allowed; }
   .tbn.ok { border-color: #f99502; color: #f99502; }
   /* 买卖气泡：挂在交易行下方，含时间/价格/数量(±100)与确认/取消 */
-  .pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: #fff;
-    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 10px 12px; }
-  .pop::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: #fff;
-    border-left: 1px solid #ececf0; border-top: 1px solid #ececf0; transform: rotate(45deg); }
+  .pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: var(--bg-card);
+    border: var(--bd-2); border-radius: 8px; box-shadow: var(--sh-pop2); padding: 10px 12px; }
+  .pop::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: var(--bg-card);
+    border-left: var(--bd-2); border-top: var(--bd-2); transform: rotate(45deg); }
   .pop .prow { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-  .pop .prow label { width: 56px; flex: none; font-size: 12px; color: #666; }
-  .pop .prow input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
-  .pop .prow input.over { border-color: #e64340; }  /* 卖出数量超过可卖：红边警示 */
-  .pop .step { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
+  .pop .prow label { width: 56px; flex: none; font-size: 12px; color: var(--tx-2); }
+  .pop .prow input { flex: 1; width: auto; min-width: 0; border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop .prow input.over { border-color: var(--bd-up-c); }  /* 卖出数量超过可卖：红边警示 */
+  .pop .step { flex: none; width: 26px; border: var(--bd-amber); background: var(--bg-accent-weak); color: var(--amber);
     border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
-  .pop .step:hover { background: #ffedd1; }
+  .pop .step:hover { background: var(--bg-accent-weak2); }
   .pop .step[disabled] { opacity: .5; cursor: not-allowed; }
-  .pop .amt { flex: 1; text-align: right; font-size: 13px; font-weight: 600; color: #333; line-height: 22px; }
-  .trade .terr { display: block; font-size: 11px; color: #e64340; margin: 0 0 8px 62px; }
+  .pop .amt { flex: 1; text-align: right; font-size: 13px; font-weight: 600; color: var(--tx-1); line-height: 22px; }
+  .trade .terr { display: block; font-size: 11px; color: var(--up); margin: 0 0 8px 62px; }
   .pop .pact { display: flex; justify-content: flex-end; gap: 8px; }
-  .up { color: #e64340; } .dn { color: #1fa37a; }
-  .tabs button { border: 0; background: #f0f0f2; padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .up { color: var(--up); } .dn { color: var(--dn); }
+  .tabs button { border: 0; background: var(--bg-soft); padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .tabs button.on { background: #f99502; color: #fff; }
   /* 周期行（按参考图）：Tab 居左、买/卖按钮居右；持仓盈亏已移到价格行右侧 */
   .tabrow { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 6px; }
@@ -70,149 +191,221 @@
   .tabrow .pop::before { left: auto; right: 22px; }
   .hrow2 .hold { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .chart { width: 100%; height: 230px; }
-  .err { color: #e64340; font-size: 12px; }
-  .ld { color: #999; font-size: 12px; }
-  .topbar { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 8px 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  /* 画线：黄色半透明 1px；画线模式按钮高亮，图内底部给操作提示（清空按钮可点） */
+  .drbtn { right: 68px; }  /* 放大按钮左侧 */
+  .drbtn.on { background: #f99502; color: #fff; }
+  .drtip { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+    background: var(--bg-tip); border: var(--bd-tip); border-radius: 4px; padding: 2px 8px;
+    color: var(--amber); font-size: 11px; white-space: normal; max-width: calc(100% - 24px); text-align: center; line-height: 1.45; }
+  .drtip button { pointer-events: auto; margin-left: 6px; border: 0; background: none; color: var(--link); cursor: pointer;
+    font-size: 11px; padding: 0 2px; }
+  .zdraw { border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px; cursor: pointer; font-size: 12px;
+    padding: 2px 8px; margin-left: 8px; align-self: center; }
+  .zdraw.on { background: #f99502; color: #fff; }
+  .err { color: var(--up); font-size: 12px; }
+  .ld { color: var(--tx-4); font-size: 12px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; background: var(--bg-card); padding: 8px 12px; box-shadow: var(--sh-card); }
   .topbar .tabs button { padding: 4px 14px; }
   /* 页面级Tab（顶栏最左）：历史模拟仓 / 实时跟随仓 */
   .ptabs { display: flex; gap: 20px; }
-  .ptabs button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: #999; cursor: pointer; border-bottom: 2px solid transparent; }
+  .ptabs button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: var(--tx-4); cursor: pointer; border-bottom: 2px solid transparent; }
   .ptabs button:hover { color: #f99502; }
-  .ptabs button.on { color: #333; font-weight: 600; border-bottom-color: #f99502; }
-  .dtr { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #666; }
-  .dtr input { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .ptabs button.on { color: var(--tx-1); font-weight: 600; border-bottom-color: #f99502; }
+  /* 亮/暗主题开关：两页顶栏共用（主题是全局偏好，不按视图分叉，故不另做 -live 副本） */
+  .thm { display: inline-flex; gap: 2px; background: var(--bg-soft); border-radius: 6px; padding: 2px; }
+  .thm button { border: 0; background: none; color: var(--tx-4); font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+  .thm button:hover { color: var(--tx-1); }
+  .thm button.on { background: #f99502; color: #fff; }
+  .dtr { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--tx-2); }
+  .dtr input { border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
   .dtr .clr { border: 0; background: none; color: #f99502; cursor: pointer; font-size: 12px; padding: 0 2px; }
   /* 日期选择器：点按钮弹出自绘日历浮层——原生 date 输入无法把特定日期置灰禁用；
      周六/周日格子置灰不可点；空值显示占位文字，选中回调 onPick，点面板外/再次点按钮收起 */
   .dp { position: relative; display: inline-flex; }
-  .dp-btn { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; min-width: 96px;
-    background: #fff; color: #333; cursor: pointer; text-align: left; font-family: inherit; }
-  .dp-btn:hover { border-color: #f0b75c; }
-  .dp-btn.ph { color: #bbb; }  /* 空值占位态 */
+  .dp-btn { border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; min-width: 96px;
+    background: var(--bg-card); color: var(--tx-1); cursor: pointer; text-align: left; font-family: inherit; }
+  .dp-btn:hover { border-color: var(--bd-amber-c); }
+  .dp-btn.ph { color: var(--tx-6); }  /* 空值占位态 */
   .dp-mask { position: fixed; inset: 0; z-index: 44; }  /* 点面板外关闭：透明遮罩低于 zmask(50) */
-  .dp-panel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 224px; background: #fff;
-    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 8px; }
-  .dp-nav { display: flex; align-items: center; justify-content: space-between; padding: 0 0 6px; font-size: 13px; color: #333; }
-  .dp-nav button { border: 0; background: none; color: #999; font-size: 14px; cursor: pointer; padding: 2px 10px; border-radius: 4px; }
-  .dp-nav button:hover { background: #f0f0f2; color: #333; }
+  .dp-panel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 224px; background: var(--bg-card);
+    border: var(--bd-2); border-radius: 8px; box-shadow: var(--sh-pop2); padding: 8px; }
+  .dp-nav { display: flex; align-items: center; justify-content: space-between; padding: 0 0 6px; font-size: 13px; color: var(--tx-1); }
+  .dp-nav button { border: 0; background: none; color: var(--tx-4); font-size: 14px; cursor: pointer; padding: 2px 10px; border-radius: 4px; }
+  .dp-nav button:hover { background: var(--bg-soft); color: var(--tx-1); }
   .dp-nav b { cursor: pointer; border-radius: 4px; padding: 1px 6px; font-weight: 600; }  /* 标题可点：逐级上翻选月/选年 */
-  .dp-nav b:hover { background: #f0f0f2; }
+  .dp-nav b:hover { background: var(--bg-soft); }
   .dp-ym { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 2px 0; }  /* 选月/选年网格：格子复用 .dp-d 样式 */
   .dp-ym .dp-d { padding: 7px 0; }  /* 年/月格子比日期格子稍高 */
   .dp-wk, .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-  .dp-wk { font-size: 11px; color: #aaa; text-align: center; padding-bottom: 2px; }
-  .dp-wk .w { color: #c8c8cc; }  /* 周末列表头同步淡化 */
-  .dp-d { border: 0; background: none; font-size: 12px; color: #333; padding: 5px 0; border-radius: 4px;
+  .dp-wk { font-size: 11px; color: var(--tx-5); text-align: center; padding-bottom: 2px; }
+  .dp-wk .w { color: var(--tx-8); }  /* 周末列表头同步淡化 */
+  .dp-d { border: 0; background: none; font-size: 12px; color: var(--tx-1); padding: 5px 0; border-radius: 4px;
     cursor: pointer; font-family: inherit; }
-  .dp-d:hover { background: #fff7ea; color: #f99502; }
-  .dp-d[disabled] { color: #c8c8cc; cursor: not-allowed; }  /* 周六/周日置灰不可点 */
-  .dp-d[disabled]:hover { background: none; color: #c8c8cc; }
+  .dp-d:hover { background: var(--bg-accent-weak); color: #f99502; }
+  .dp-d[disabled] { color: var(--tx-8); cursor: not-allowed; }  /* 周六/周日、未来日期置灰不可点 */
+  .dp-d[disabled]:hover { background: none; color: var(--tx-8); }
   .dp-d.sel, .dp-d.sel:hover { background: #f99502; color: #fff; }  /* 当前选中值 */
   .dp-d.td { box-shadow: inset 0 0 0 1px #f99502; }  /* 今天描边 */
   .dp-d.sel.td { box-shadow: none; }
   .search { position: relative; display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  .search input { border: 1px solid #ddd; border-radius: 4px; padding: 4px 8px; width: 200px; }
+  .search input { border: var(--bd-1); border-radius: 4px; padding: 4px 8px; width: 200px; }
   .search .add { background: #f99502; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; cursor: pointer;
     transition: background-color .15s ease, box-shadow .15s ease, transform .06s ease; }
   .search .add:hover { background: #e88a00; box-shadow: 0 2px 6px rgba(249,149,2,.35); }
   .search .add:active { background: #cf7a00; transform: translateY(1px) scale(.96); box-shadow: none; }
   .search .add.on { box-shadow: 0 0 0 3px rgba(249,149,2,.22); }  /* 已选中个股，提示可点击添加 */
-  .drop { position: absolute; top: 32px; right: 0; background: #fff; border: 1px solid #eee; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
+  .drop { position: absolute; top: 32px; right: 0; background: var(--bg-card); border: var(--bd-3); border-radius: 4px; box-shadow: var(--sh-pop); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
   .drop div { padding: 6px 10px; cursor: pointer; font-size: 13px; }
-  .drop div:hover { background: #fff7ea; }
-  .drop div.on { background: #ffedd1; box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
-  .tbtn { border: 1px solid #f99502; background: #fff; color: #f99502; border-radius: 4px;
+  .drop div:hover { background: var(--bg-accent-weak); }
+  .drop div.on { background: var(--bg-accent-weak2); box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
+  .tbtn { border: 1px solid #f99502; background: var(--bg-card); color: #f99502; border-radius: 4px;
     padding: 3px 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
-  .tbtn:hover { background: #fff7ea; }
+  .tbtn:hover { background: var(--bg-accent-weak); }
   .tbtn.on { background: #f99502; color: #fff; }
+  /* 回测弹窗（hist/live 共用同一浮层）：居中+遮罩变暗；配置行固定不滚，结果区内部滚动 */
+  .btmask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
+  .btpanel { background: var(--bg-card); border-radius: 10px; width: min(1080px, 96vw); max-height: 90vh;
+    display: flex; flex-direction: column; box-shadow: 0 10px 36px rgba(0,0,0,.7); }
+  .bthd { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 8px; }
+  .bthd b { font-size: 15px; color: var(--tx-1); }
+  .bthd i { font-size: 12px; color: var(--tx-4); font-style: normal; }
+  .btclose { margin-left: auto; border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px;
+    cursor: pointer; font-size: 12px; padding: 2px 9px; align-self: center; }
+  .btclose:hover { background: #e64340; color: #fff; }
+  .btcfg { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 0 16px 10px;
+    border-bottom: var(--bd-3); font-size: 13px; color: var(--tx-2); }
+  .btcfg b { color: var(--tx-1); }
+  .btcfg input { border: var(--bd-1); border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 150px; }
+  .btrow { position: relative; display: flex; align-items: center; gap: 6px; }
+  .btsym-on { border: 1px solid #f99502; background: var(--bg-accent-weak); color: #f99502; border-radius: 4px;
+    font-size: 12px; padding: 3px 8px; max-width: 210px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; cursor: pointer; }
+  .btsym-on em { font-style: normal; opacity: .5; margin-left: 6px; }
+  .btsym-on:hover { background: var(--bg-soft); }
+  .btquick { display: flex; gap: 6px; }
+  .btquick button { border: var(--bd-1); background: var(--bg-field); color: var(--tx-2); border-radius: 4px;
+    font-size: 12px; padding: 3px 8px; cursor: pointer; }
+  .btquick button:hover { border-color: var(--bd-amber-c); color: #f99502; }
+  .btgo { border: 1px solid #f99502; background: #f99502; color: #fff; border-radius: 4px; padding: 4px 16px;
+    font-size: 13px; cursor: pointer; }
+  .btgo:hover { background: #e88a00; }
+  .btgo[disabled] { opacity: .6; cursor: not-allowed; }
+  .btbody { flex: 1; min-height: 0; overflow: auto; padding: 10px 16px 16px; }
+  .btcards { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+  .btcards button { border: var(--bd-2); background: var(--bg-field); color: var(--tx-2); border-radius: 12px;
+    font-size: 12px; padding: 2px 9px; cursor: pointer; }
+  .btcards button:hover { border-color: var(--bd-amber-c); color: #f99502; }
+  .btcards button.on { border-color: #f99502; color: #f99502; background: var(--bg-accent-weak); }
+  .btstat { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: var(--tx-2); padding: 4px 0 8px; }
+  .btstat b { margin-left: 6px; font-weight: 700; color: var(--tx-1); }
+  .btchart { width: 100%; height: 300px; }
+  /* 回测结果：区间日K（带买卖点）+ 成交明细 + 资金曲线 */
+  .btkchart { width: 100%; height: 400px; }
+  .btdeal { font-size: 13px; color: var(--tx-2); padding: 12px 0 4px; }
+  .bttbl { border-top: var(--bd-4); }
+  .bttr { display: grid; grid-template-columns: 1.1fr .6fr .8fr .8fr .9fr .9fr 1.5fr; gap: 6px;
+    align-items: baseline; padding: 7px 0; font-size: 12px; border-bottom: var(--bd-5); color: var(--tx-2); }
+  .bttr > span { text-align: right; white-space: nowrap; }
+  .bttr > span:first-child, .bttr > span:last-child { text-align: left; }
+  .bthd2 { color: var(--tx-5); font-size: 12px; }
+  .btrs { color: var(--tx-4); overflow: hidden; text-overflow: ellipsis; }
+  .btnavhd { font-size: 13px; color: var(--tx-2); padding: 14px 0 2px; }
+  .btnavchart { width: 100%; height: 180px; }
+  .btrule { font-size: 12px; color: var(--tx-5); padding: 6px 0 0; line-height: 1.5; }
+  .btph { color: var(--tx-4); font-size: 13px; padding: 26px 0; text-align: center; }
+  .btwarn { color: var(--amber); font-size: 12px; padding: 4px 0; }
+  .bterr { color: var(--up); font-size: 12px; padding: 4px 0; }
   /* 全部收益抽屉：右侧滑出、页面不变暗；点抽屉外/×/Esc 关闭 */
   .drawer-mask { position: fixed; inset: 0; z-index: 40; }
-  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: #fff;
-    box-shadow: -8px 0 28px rgba(0,0,0,.16); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: var(--bg-card);
+    box-shadow: var(--sh-drawer); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
   @keyframes dslide { from { transform: translateX(100%); } }
   .dhd { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 8px; }
-  .dhd .dtitle { font-size: 17px; font-weight: 700; color: #333; }
-  .dhd .dtitle i { font-style: normal; font-size: 12px; font-weight: 400; color: #999; margin-left: 8px; }
-  .dhd .dclose { border: 0; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
-  .dhd .dclose:hover { color: #333; }
-  .dtabs { display: flex; gap: 24px; padding: 0 20px; border-bottom: 1px solid #eee; }
-  .dtabs button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: #999; cursor: pointer;
+  .dhd .dtitle { font-size: 17px; font-weight: 700; color: var(--tx-1); }
+  .dhd .dtitle i { font-style: normal; font-size: 12px; font-weight: 400; color: var(--tx-4); margin-left: 8px; }
+  .dhd .dclose { border: 0; background: none; color: var(--tx-4); font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
+  .dhd .dclose:hover { color: var(--tx-1); }
+  .dtabs { display: flex; gap: 24px; padding: 0 20px; border-bottom: var(--bd-3); }
+  .dtabs button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: var(--tx-4); cursor: pointer;
     border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .dtabs button:hover { color: #f99502; }
-  .dtabs button.on { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dtabs button.on { color: var(--tx-1); font-weight: 600; border-bottom-color: #f99502; }
   .dbody { flex: 1; overflow-y: auto; padding: 6px 20px 20px; }
-  .dtot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px 22px; padding: 12px 0; font-size: 13px; color: #666; }
-  .dtot b { font-size: 16px; font-weight: 700; margin: 0 2px; color: #333; }
+  .dtot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px 22px; padding: 12px 0; font-size: 13px; color: var(--tx-2); }
+  .dtot b { font-size: 16px; font-weight: 700; margin: 0 2px; color: var(--tx-1); }
   /* 持仓明细：名称/现价/成本/数量/可卖/市值/盈亏金额/盈亏%/买入时间/删除 十列（可卖=后端 sellable，A股当日买入的份额次日才可卖；末列删除=清掉该标的全部流水） */
   .hhd, .hrow { display: grid; grid-template-columns: 1.5fr .8fr .8fr .7fr .7fr 1fr .9fr .8fr 1.3fr 28px; gap: 6px; align-items: center;
     font-size: 13px; }
-  .hhd { color: #aaa; font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid #f0f0f2; }
-  .hrow { padding: 9px 0; border-bottom: 1px solid #f5f6f7; }
+  .hhd { color: var(--tx-5); font-size: 12px; padding: 4px 0 6px; border-bottom: var(--bd-4); }
+  .hrow { padding: 9px 0; border-bottom: var(--bd-5); }
   .hhd span, .hrow > span { text-align: right; }
   .hhd span:first-child, .hrow .hnm { text-align: left; }
-  .hrow .hnm { color: #333; line-height: 1.35; }
-  .hrow .hnm i { display: block; font-style: normal; color: #999; font-size: 11px; margin-left: 0; }
-  .hrow .hbt { font-size: 12px; color: #666; white-space: nowrap; line-height: 1.35; }
-  .hrow .hbt i { display: block; font-style: normal; color: #999; }
+  .hrow .hnm { color: var(--tx-1); line-height: 1.35; }
+  .hrow .hnm i { display: block; font-style: normal; color: var(--tx-4); font-size: 11px; margin-left: 0; }
+  .hrow .hbt { font-size: 12px; color: var(--tx-2); white-space: nowrap; line-height: 1.35; }
+  .hrow .hbt i { display: block; font-style: normal; color: var(--tx-4); }
   /* 订单列表：买入红/卖出绿，卖出行右侧挂共收益，末列行删除；fr 网格自适应，窄抽屉下不横向溢出 */
   .orow { display: grid; grid-template-columns: 44px minmax(0,1.1fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,1.2fr) minmax(0,1.2fr) 28px;
-    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: 1px solid #f5f6f7; }
+    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: var(--bd-5); }
   .orow > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .orow .act { font-weight: 600; }
-  .orow .onm { color: #333; }
-  .orow .ocode { color: #999; font-size: 12px; }
-  .orow .opx, .orow .oqt { color: #333; text-align: right; }
-  .orow .odt { color: #999; font-size: 12px; }
-  .orow .opl { text-align: right; color: #666; font-size: 12px; }
+  .orow .onm { color: var(--tx-1); }
+  .orow .ocode { color: var(--tx-4); font-size: 12px; }
+  .orow .opx, .orow .oqt { color: var(--tx-1); text-align: right; }
+  .orow .odt { color: var(--tx-4); font-size: 12px; }
+  .orow .opl { text-align: right; color: var(--tx-2); font-size: 12px; }
   .orow .opl b { font-size: 14px; font-weight: 700; margin: 0 3px; }
-  .odel { border: 0; background: none; color: #ccc; font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
-  .odel:hover { color: #e64340; }
-  .dnote { color: #c0c0c0; font-size: 12px; text-align: center; padding: 16px 0 6px; }
+  .odel { border: 0; background: none; color: var(--tx-8); font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
+  .odel:hover { color: var(--up); }
+  .dclr { border: 0; background: none; color: var(--tx-4); font-size: 12px; cursor: pointer; display: block; margin: 0 0 4px auto; padding: 2px 0; }
+  .dclr:hover { color: var(--up); }
+  .dtot .dclr { display: inline-block; margin: 0 0 0 auto; padding: 0; }  /* 汇总行内末尾：与那排同 baseline 对齐并推到最右 */
+  .dnote { color: var(--tx-7); font-size: 12px; text-align: center; padding: 16px 0 6px; }
 
   /* ================= 实时跟随仓（live）样式镜像 =================
      以下为上方全部 class 的 -live 副本（自动生成），live 页独立修改互不影响 */
-  body { margin: 0; background: #f2f3f5; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  body { margin: 0; background: var(--bg-page); font-family: system-ui, "Microsoft YaHei", sans-serif; }
   .grid-live { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px; }
   @media (min-width: 1600px) { .grid-live { grid-template-columns: repeat(4, 1fr); } }
   @media (max-width: 1200px) { .grid-live { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 800px) { .grid-live { grid-template-columns: 1fr; } }
-  .card-live { position: relative; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 8px; }
+  .card-live { position: relative; background: var(--bg-card); border-radius: 8px; box-shadow: var(--sh-card); padding: 8px; }
   .grip-live { cursor: move; }
-  .del-live { position: absolute; top: 6px; right: 8px; border: 0; background: #f0f0f2; color: #888; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
+  .del-live { position: absolute; top: 6px; right: 8px; border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
   .del-live:hover { background: #e64340; color: #fff; }
   .hd-live { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 4px; font-size: 13px; }
   .hd-live .chg-live { font-size: 12px; margin-left: 6px; font-weight: 600; }
-  .px-live { font-size: 15px; font-weight: 700; color: #333; }
+  .px-live { font-size: 15px; font-weight: 700; color: var(--tx-1); }
   .hrow2-live { display: flex; justify-content: space-between; align-items: baseline; width: 100%; }
-  .hold-live { font-size: 12px; color: #999; }
+  .hold-live { font-size: 12px; color: var(--tx-4); }
   .hold-live b { font-weight: 700; margin: 0 3px 0 1px; }
-  .flag-live { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: 0 0 0 1px rgba(0,0,0,.1); }
+  .flag-live { height: 12px; margin: 0 2px 0 4px; vertical-align: -1px; border-radius: 1px; box-shadow: var(--sh-flag); }
   /* 卡片交易行：买入红描边/卖出绿描边，无持仓或A股当日买入时卖出灰掉；点按钮弹出买卖气泡 */
   .trade-live { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 2px; }
-  .tbn-live { border: 1px solid #e64340; color: #e64340; background: #fff; border-radius: 4px; padding: 2px 12px;
+  .tbn-live { border: var(--bd-up); color: var(--up); background: var(--bg-card); border-radius: 4px; padding: 2px 12px;
     font-size: 12px; cursor: pointer; white-space: nowrap; transition: background-color .15s ease; }
-  .tbn-live:hover { background: #fdecec; }
-  .tbn-live.sell-live { border-color: #1fa37a; color: #1fa37a; }
-  .tbn-live.sell-live:hover { background: #e8f7f0; }
-  .tbn-live[disabled] { border-color: #d9d9de; color: #c2c2c8; background: #f7f7f8; cursor: not-allowed; }
+  .tbn-live:hover { background: var(--bg-up-weak); }
+  .tbn-live.sell-live { border-color: var(--bd-dn); color: var(--dn); }
+  .tbn-live.sell-live:hover { background: var(--bg-dn-weak); }
+  .tbn-live[disabled] { border-color: var(--bd-1c); color: var(--tx-9); background: var(--bg-soft2); cursor: not-allowed; }
   .tbn-live.ok-live { border-color: #f99502; color: #f99502; }
   /* 买卖气泡：挂在交易行下方，含时间/价格/数量(±100)与确认/取消 */
-  .pop-live { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: #fff;
-    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 10px 12px; }
-  .pop-live::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: #fff;
-    border-left: 1px solid #ececf0; border-top: 1px solid #ececf0; transform: rotate(45deg); }
+  .pop-live { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 250px; background: var(--bg-card);
+    border: var(--bd-2); border-radius: 8px; box-shadow: var(--sh-pop2); padding: 10px 12px; }
+  .pop-live::before { content: ""; position: absolute; top: -5px; left: 22px; width: 8px; height: 8px; background: var(--bg-card);
+    border-left: var(--bd-2); border-top: var(--bd-2); transform: rotate(45deg); }
   .pop-live .prow-live { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-  .pop-live .prow-live label { width: 56px; flex: none; font-size: 12px; color: #666; }
-  .pop-live .prow-live input { flex: 1; width: auto; min-width: 0; border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
-  .pop-live .prow-live input.over { border-color: #e64340; }  /* 卖出数量超过可卖：红边警示 */
-  .pop-live .step-live { flex: none; width: 26px; border: 1px solid #f0b75c; background: #fff7ea; color: #b97c00;
+  .pop-live .prow-live label { width: 56px; flex: none; font-size: 12px; color: var(--tx-2); }
+  .pop-live .prow-live input { flex: 1; width: auto; min-width: 0; border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pop-live .prow-live input.over { border-color: var(--bd-up-c); }  /* 卖出数量超过可卖：红边警示 */
+  .pop-live .step-live { flex: none; width: 26px; border: var(--bd-amber); background: var(--bg-accent-weak); color: var(--amber);
     border-radius: 4px; padding: 4px 0; font-size: 13px; line-height: 1; cursor: pointer; }
-  .pop-live .step-live:hover { background: #ffedd1; }
+  .pop-live .step-live:hover { background: var(--bg-accent-weak2); }
   .pop-live .step-live[disabled] { opacity: .5; cursor: not-allowed; }
-  .trade-live .terr-live { display: block; font-size: 11px; color: #e64340; margin: 0 0 8px 62px; }
+  .trade-live .terr-live { display: block; font-size: 11px; color: var(--up); margin: 0 0 8px 62px; }
   .pop-live .pact-live { display: flex; justify-content: flex-end; gap: 8px; }
-  .up-live { color: #e64340; } .dn-live { color: #1fa37a; }
-  .tabs-live button { border: 0; background: #f0f0f2; padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .up-live { color: var(--up); } .dn-live { color: var(--dn); }
+  .tabs-live button { border: 0; background: var(--bg-soft); padding: 2px 8px; margin-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .tabs-live button.on-live { background: #f99502; color: #fff; }
   /* 周期行（按参考图）：Tab 居左、买/卖按钮居右；持仓盈亏已移到价格行右侧 */
   .tabrow-live { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 6px; }
@@ -221,103 +414,118 @@
   .tabrow-live .pop-live::before { left: auto; right: 22px; }
   .hrow2-live .hold-live { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .chart-live { width: 100%; height: 230px; }
-  .err-live { color: #e64340; font-size: 12px; }
-  .ld-live { color: #999; font-size: 12px; }
-  .topbar-live { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 8px 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  /* 画线（live 镜像）：黄色半透明 1px；画线模式按钮高亮，图内底部给操作提示（清空按钮可点） */
+  .drbtn-live { position: absolute; top: 6px; right: 38px; border: 0; background: var(--bg-soft); color: var(--tx-3);
+    border-radius: 4px; cursor: pointer; font-size: 12px; padding: 1px 7px; z-index: 5; }
+  .drbtn-live.on-live { background: #f99502; color: #fff; }
+  .drtip-live { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+    background: var(--bg-tip); border: var(--bd-tip); border-radius: 4px; padding: 2px 8px;
+    color: var(--amber); font-size: 11px; white-space: normal; max-width: calc(100% - 24px); text-align: center; line-height: 1.45; }
+  .drtip-live button { pointer-events: auto; margin-left: 6px; border: 0; background: none; color: var(--link); cursor: pointer;
+    font-size: 11px; padding: 0 2px; }
+  .zdraw-live { border: 0; background: var(--bg-soft); color: var(--tx-3); border-radius: 4px; cursor: pointer; font-size: 12px;
+    padding: 2px 8px; margin-left: 8px; align-self: center; }
+  .zdraw-live.on-live { background: #f99502; color: #fff; }
+  .err-live { color: var(--up); font-size: 12px; }
+  .ld-live { color: var(--tx-4); font-size: 12px; }
+  .topbar-live { display: flex; justify-content: space-between; align-items: center; background: var(--bg-card); padding: 8px 12px; box-shadow: var(--sh-card); }
   .topbar-live .tabs-live button { padding: 4px 14px; }
   /* 页面级Tab（顶栏最左）：历史模拟仓 / 实时跟随仓 */
   .ptabs-live { display: flex; gap: 20px; }
-  .ptabs-live button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: #999; cursor: pointer; border-bottom: 2px solid transparent; }
+  .ptabs-live button { border: 0; background: none; padding: 2px 2px 6px; font-size: 14px; color: var(--tx-4); cursor: pointer; border-bottom: 2px solid transparent; }
   .ptabs-live button:hover { color: #f99502; }
-  .ptabs-live button.on-live { color: #333; font-weight: 600; border-bottom-color: #f99502; }
-  .dtr-live { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #666; }
-  .dtr-live input { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .ptabs-live button.on-live { color: var(--tx-1); font-weight: 600; border-bottom-color: #f99502; }
+  .dtr-live { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--tx-2); }
+  .dtr-live input { border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
   .dtr-live .clr-live { border: 0; background: none; color: #f99502; cursor: pointer; font-size: 12px; padding: 0 2px; }
   /* 日期选择器：点按钮弹出自绘日历浮层——原生 date 输入无法把特定日期置灰禁用；
      周六/周日格子置灰不可点；空值显示占位文字，选中回调 onPick，点面板外/再次点按钮收起 */
   .dp-live { position: relative; display: inline-flex; }
-  .dp-btn-live { border: 1px solid #ddd; border-radius: 4px; padding: 3px 6px; font-size: 12px; min-width: 96px;
-    background: #fff; color: #333; cursor: pointer; text-align: left; font-family: inherit; }
-  .dp-btn-live:hover { border-color: #f0b75c; }
-  .dp-btn-live.ph-live { color: #bbb; }  /* 空值占位态 */
+  .dp-btn-live { border: var(--bd-1); border-radius: 4px; padding: 3px 6px; font-size: 12px; min-width: 96px;
+    background: var(--bg-card); color: var(--tx-1); cursor: pointer; text-align: left; font-family: inherit; }
+  .dp-btn-live:hover { border-color: var(--bd-amber-c); }
+  .dp-btn-live.ph-live { color: var(--tx-6); }  /* 空值占位态 */
   .dp-mask-live { position: fixed; inset: 0; z-index: 44; }  /* 点面板外关闭：透明遮罩低于 zmask(50) */
-  .dp-panel-live { position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 224px; background: #fff;
-    border: 1px solid #ececf0; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 8px; }
-  .dp-nav-live { display: flex; align-items: center; justify-content: space-between; padding: 0 0 6px; font-size: 13px; color: #333; }
-  .dp-nav-live button { border: 0; background: none; color: #999; font-size: 14px; cursor: pointer; padding: 2px 10px; border-radius: 4px; }
-  .dp-nav-live button:hover { background: #f0f0f2; color: #333; }
+  .dp-panel-live { position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 224px; background: var(--bg-card);
+    border: var(--bd-2); border-radius: 8px; box-shadow: var(--sh-pop2); padding: 8px; }
+  .dp-nav-live { display: flex; align-items: center; justify-content: space-between; padding: 0 0 6px; font-size: 13px; color: var(--tx-1); }
+  .dp-nav-live button { border: 0; background: none; color: var(--tx-4); font-size: 14px; cursor: pointer; padding: 2px 10px; border-radius: 4px; }
+  .dp-nav-live button:hover { background: var(--bg-soft); color: var(--tx-1); }
   .dp-nav-live b { cursor: pointer; border-radius: 4px; padding: 1px 6px; font-weight: 600; }
-  .dp-nav-live b:hover { background: #f0f0f2; }
+  .dp-nav-live b:hover { background: var(--bg-soft); }
   .dp-ym-live { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 2px 0; }
   .dp-ym-live .dp-d-live { padding: 7px 0; }
   .dp-wk-live, .dp-grid-live { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-  .dp-wk-live { font-size: 11px; color: #aaa; text-align: center; padding-bottom: 2px; }
-  .dp-wk-live .w-live { color: #c8c8cc; }  /* 周末列表头同步淡化 */
-  .dp-d-live { border: 0; background: none; font-size: 12px; color: #333; padding: 5px 0; border-radius: 4px;
+  .dp-wk-live { font-size: 11px; color: var(--tx-5); text-align: center; padding-bottom: 2px; }
+  .dp-wk-live .w-live { color: var(--tx-8); }  /* 周末列表头同步淡化 */
+  .dp-d-live { border: 0; background: none; font-size: 12px; color: var(--tx-1); padding: 5px 0; border-radius: 4px;
     cursor: pointer; font-family: inherit; }
-  .dp-d-live:hover { background: #fff7ea; color: #f99502; }
-  .dp-d-live[disabled] { color: #c8c8cc; cursor: not-allowed; }  /* 周六/周日置灰不可点 */
-  .dp-d-live[disabled]:hover { background: none; color: #c8c8cc; }
+  .dp-d-live:hover { background: var(--bg-accent-weak); color: #f99502; }
+  .dp-d-live[disabled] { color: var(--tx-8); cursor: not-allowed; }  /* 周六/周日、未来日期置灰不可点 */
+  .dp-d-live[disabled]:hover { background: none; color: var(--tx-8); }
   .dp-d-live.sel-live, .dp-d-live.sel-live:hover { background: #f99502; color: #fff; }  /* 当前选中值 */
   .dp-d-live.td-live { box-shadow: inset 0 0 0 1px #f99502; }  /* 今天描边 */
   .dp-d-live.sel-live.td-live { box-shadow: none; }
   .search-live { position: relative; display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  .search-live input { border: 1px solid #ddd; border-radius: 4px; padding: 4px 8px; width: 200px; }
+  .search-live input { border: var(--bd-1); border-radius: 4px; padding: 4px 8px; width: 200px; }
   .search-live .add-live { background: #f99502; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; cursor: pointer;
     transition: background-color .15s ease, box-shadow .15s ease, transform .06s ease; }
   .search-live .add-live:hover { background: #e88a00; box-shadow: 0 2px 6px rgba(249,149,2,.35); }
   .search-live .add-live:active { background: #cf7a00; transform: translateY(1px) scale(.96); box-shadow: none; }
   .search-live .add-live.on-live { box-shadow: 0 0 0 3px rgba(249,149,2,.22); }  /* 已选中个股，提示可点击添加 */
-  .drop-live { position: absolute; top: 32px; right: 0; background: #fff; border: 1px solid #eee; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
+  .drop-live { position: absolute; top: 32px; right: 0; background: var(--bg-card); border: var(--bd-3); border-radius: 4px; box-shadow: var(--sh-pop); z-index: 10; min-width: 240px; max-height: 260px; overflow: auto; }
   .drop-live div { padding: 6px 10px; cursor: pointer; font-size: 13px; }
-  .drop-live div:hover { background: #fff7ea; }
-  .drop-live div.on-live { background: #ffedd1; box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
-  .tbtn-live { border: 1px solid #f99502; background: #fff; color: #f99502; border-radius: 4px;
+  .drop-live div:hover { background: var(--bg-accent-weak); }
+  .drop-live div.on-live { background: var(--bg-accent-weak2); box-shadow: inset 3px 0 0 #f99502; }  /* 选中的结果行 */
+  .tbtn-live { border: 1px solid #f99502; background: var(--bg-card); color: #f99502; border-radius: 4px;
     padding: 3px 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
-  .tbtn-live:hover { background: #fff7ea; }
+  .tbtn-live:hover { background: var(--bg-accent-weak); }
   .tbtn-live.on-live { background: #f99502; color: #fff; }
   /* 全部收益抽屉：右侧滑出、页面不变暗；点抽屉外/×/Esc 关闭 */
   .drawer-mask-live { position: fixed; inset: 0; z-index: 40; }
-  .drawer-live { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: #fff;
-    box-shadow: -8px 0 28px rgba(0,0,0,.16); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
+  .drawer-live { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw); background: var(--bg-card);
+    box-shadow: var(--sh-drawer); display: flex; flex-direction: column; animation: dslide .18s ease-out; }
   @keyframes dslide { from { transform: translateX(100%); } }
   .dhd-live { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 8px; }
-  .dhd-live .dtitle-live { font-size: 17px; font-weight: 700; color: #333; }
-  .dhd-live .dclose-live { border: 0; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
-  .dhd-live .dclose-live:hover { color: #333; }
-  .dtabs-live { display: flex; gap: 24px; padding: 0 20px; border-bottom: 1px solid #eee; }
-  .dtabs-live button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: #999; cursor: pointer;
+  .dhd-live .dtitle-live { font-size: 17px; font-weight: 700; color: var(--tx-1); }
+  .dhd-live .dclose-live { border: 0; background: none; color: var(--tx-4); font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
+  .dhd-live .dclose-live:hover { color: var(--tx-1); }
+  .dtabs-live { display: flex; gap: 24px; padding: 0 20px; border-bottom: var(--bd-3); }
+  .dtabs-live button { border: 0; background: none; padding: 6px 2px 10px; font-size: 14px; color: var(--tx-4); cursor: pointer;
     border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .dtabs-live button:hover { color: #f99502; }
-  .dtabs-live button.on-live { color: #333; font-weight: 600; border-bottom-color: #f99502; }
+  .dtabs-live button.on-live { color: var(--tx-1); font-weight: 600; border-bottom-color: #f99502; }
   .dbody-live { flex: 1; overflow-y: auto; padding: 6px 20px 20px; }
-  .dtot-live { display: flex; align-items: baseline; gap: 22px; padding: 12px 0; font-size: 13px; color: #666; }
-  .dtot-live b { font-size: 16px; font-weight: 700; margin: 0 2px; color: #333; }
+  .dtot-live { display: flex; align-items: baseline; gap: 22px; padding: 12px 0; font-size: 13px; color: var(--tx-2); }
+  .dtot-live b { font-size: 16px; font-weight: 700; margin: 0 2px; color: var(--tx-1); }
   /* 持仓明细：名称/现价/成本/数量/可卖/市值/盈亏金额/盈亏%/买入时间/删除 十列（与历史仓同构） */
   .hhd-live, .hrow-live { display: grid; grid-template-columns: 1.5fr .8fr .8fr .7fr .7fr 1fr .9fr .8fr 1.3fr 28px; gap: 6px; align-items: center;
     font-size: 13px; }
-  .hhd-live { color: #aaa; font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid #f0f0f2; }
-  .hrow-live { padding: 9px 0; border-bottom: 1px solid #f5f6f7; }
+  .hhd-live { color: var(--tx-5); font-size: 12px; padding: 4px 0 6px; border-bottom: var(--bd-4); }
+  .hrow-live { padding: 9px 0; border-bottom: var(--bd-5); }
   .hhd-live span, .hrow-live > span { text-align: right; }
   .hhd-live span:first-child, .hrow-live .hnm-live { text-align: left; }
-  .hrow-live .hnm-live { color: #333; line-height: 1.35; }
-  .hrow-live .hnm-live i { display: block; font-style: normal; color: #999; font-size: 11px; margin-left: 0; }
-  .hrow-live .hbt-live { font-size: 12px; color: #666; white-space: nowrap; line-height: 1.35; }
-  .hrow-live .hbt-live i { display: block; font-style: normal; color: #999; }
+  .hrow-live .hnm-live { color: var(--tx-1); line-height: 1.35; }
+  .hrow-live .hnm-live i { display: block; font-style: normal; color: var(--tx-4); font-size: 11px; margin-left: 0; }
+  .hrow-live .hbt-live { font-size: 12px; color: var(--tx-2); white-space: nowrap; line-height: 1.35; }
+  .hrow-live .hbt-live i { display: block; font-style: normal; color: var(--tx-4); }
   /* 订单列表：买入红/卖出绿，卖出行右侧挂共收益，末列行删除；fr 网格自适应，窄抽屉下不横向溢出 */
   .orow-live { display: grid; grid-template-columns: 44px minmax(0,1.1fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,.7fr) minmax(0,1.2fr) minmax(0,1.2fr) 28px;
-    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: 1px solid #f5f6f7; }
+    gap: 6px; align-items: baseline; padding: 10px 0; font-size: 13px; border-bottom: var(--bd-5); }
   .orow-live > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .orow-live .act-live { font-weight: 600; }
-  .orow-live .onm-live { color: #333; }
-  .orow-live .ocode-live { color: #999; font-size: 12px; }
-  .orow-live .opx-live, .orow-live .oqt-live { color: #333; text-align: right; }
-  .orow-live .odt-live { color: #999; font-size: 12px; }
-  .orow-live .opl-live { text-align: right; color: #666; font-size: 12px; }
+  .orow-live .onm-live { color: var(--tx-1); }
+  .orow-live .ocode-live { color: var(--tx-4); font-size: 12px; }
+  .orow-live .opx-live, .orow-live .oqt-live { color: var(--tx-1); text-align: right; }
+  .orow-live .odt-live { color: var(--tx-4); font-size: 12px; }
+  .orow-live .opl-live { text-align: right; color: var(--tx-2); font-size: 12px; }
   .orow-live .opl-live b { font-size: 14px; font-weight: 700; margin: 0 3px; }
-  .odel-live { border: 0; background: none; color: #ccc; font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
-  .odel-live:hover { color: #e64340; }
-  .dnote-live { color: #c0c0c0; font-size: 12px; text-align: center; padding: 16px 0 6px; }
+  .odel-live { border: 0; background: none; color: var(--tx-8); font-size: 13px; cursor: pointer; padding: 0 2px; justify-self: end; }
+  .odel-live:hover { color: var(--up); }
+  .dclr-live { border: 0; background: none; color: var(--tx-4); font-size: 12px; cursor: pointer; display: block; margin: 0 0 4px auto; padding: 2px 0; }
+  .dclr-live:hover { color: var(--up); }
+  .dtot-live .dclr-live { display: inline-block; margin: 0 0 0 auto; padding: 0; }  /* 汇总行内末尾：与那排同 baseline 对齐并推到最右 */
+  .dnote-live { color: var(--tx-7); font-size: 12px; text-align: center; padding: 16px 0 6px; }
 
 </style>
 </head>
@@ -329,8 +537,19 @@ const { useState, useEffect, useRef } = React;
 
 // 卡片列表已改为持久化：首屏从 GET /api/cards 加载，种子自选股见 server/main.py 的 SEED_CARDS
 const TABS = [["min", "分时"], ["day5", "5日"], ["m5", "5分"], ["m30", "30分"], ["m60", "60分"], ["day", "日K"]];
-const UP = "#e64340", DN = "#1fa37a"; // 国内红涨绿跌
-const MAS = [["ma3", "#e6a23c"], ["ma5", "#409eff"], ["ma85", "#2f855a"], ["ma125", "#805ad5"]]; // 均线3/5/85/125：键名与后端 ind 一致
+// ===== 主题 =====
+// 亮/暗两套颜色只写在 CSS 变量里（:root 是深色，html.light 是亮色），切主题就是给 <html> 加/去 light 类。
+// ECharts 读不到样式表，所以建图时用 chartPal() 把当前生效的变量值取出来交给 option；
+// 主题一变、卡片 effect 重跑（theme 在依赖里），图就按新主题重绘。
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const chartPal = () => ({
+  up: cssVar("--up"), dn: cssVar("--dn"), dif: cssVar("--dif"),  // 国内红涨绿跌
+  ma: [["ma3", cssVar("--ma3")], ["ma5", cssVar("--ma5")], ["ma85", cssVar("--ma85")], ["ma125", cssVar("--ma125")]],
+  zoom: { border: cssVar("--zoom-border"), bg: cssVar("--zoom-bg"), tx: cssVar("--zoom-tx"),
+          line: cssVar("--zoom-line"), area: cssVar("--zoom-area"),
+          selLine: cssVar("--zoom-sel-line"), filler: cssVar("--zoom-filler") },
+  draw: cssVar("--draw"), drawSel: cssVar("--draw-sel"),
+});
 // 双击 HTML（file://）或本地预览服务器（如 VSCode Live Preview，本机非 8000 端口）打开时，接口指向本机后端；
 // 经 uvicorn 托管打开或线上部署时，用同源相对路径
 const API_BASE = (location.protocol === "file:" ||
@@ -372,6 +591,7 @@ const nowLocal = () => {
 };
 
 function kOpt(d, zoomAll) {
+  const P = chartPal();  // 当前主题配色（深/亮各一套变量值）
   const rows = d.klines || [];
   const cats = rows.map(r => r[0]);
   const ind = d.ind || {};
@@ -381,7 +601,7 @@ function kOpt(d, zoomAll) {
   const base = cls.length > 1 ? cls[cls.length - 2] : (cls[0] || 1);  // 涨跌%基准：昨收(倒数第二根收盘)
   let lo = Math.min(...k.map(v => v[2])), hi = Math.max(...k.map(v => v[3]));
   // 85/125日均线含窗口外预热段的价格（如大跌后均线远高于图内K线），Y轴范围须并入均线值，防均线被上下边缘裁掉
-  MAS.forEach(([key]) => (ind[key] || []).forEach(v => {
+  P.ma.forEach(([key]) => (ind[key] || []).forEach(v => {
     if (v == null) return;
     if (v < lo) lo = v;
     if (v > hi) hi = v;
@@ -389,6 +609,7 @@ function kOpt(d, zoomAll) {
   if (!(hi > lo)) { lo *= 0.999; hi = hi * 1.001 || 1; }  // 防单根K线除零
   return {
     animation: false,
+    backgroundColor: "transparent",  // 交给卡片/弹窗的深色底，画布不再自带浅底
     // 十字光标只保留三轴指针标签（左股价/右涨跌%/底部日期），不弹白色浮窗
     tooltip: { trigger: "axis", showContent: false, axisPointer: { type: "cross", link: [{ xAxisIndex: "all" }] } },
     grid: [
@@ -411,11 +632,31 @@ function kOpt(d, zoomAll) {
     dataZoom: [{ type: "inside", xAxisIndex: [0, 1], start: zoomAll ? 0 : 80, end: 100 }],  // 平时只看最后60根；有日期筛选时显示整个区间
     series: [
       { name: "K", type: "candlestick", data: k,
-        itemStyle: { color: UP, color0: DN, borderColor: UP, borderColor0: DN } },
-      ...MAS.map(([key, c]) => ({ name: key.toUpperCase(), type: "line", data: ind[key], showSymbol: false, lineStyle: { width: 1, color: c } })),
-      { name: "MACD", type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: macd.map(v => v == null ? null : { value: v, itemStyle: { color: v >= 0 ? UP : DN } }) },
-      { name: "DIF", type: "line", xAxisIndex: 1, yAxisIndex: 1, data: ind.dif, showSymbol: false, lineStyle: { width: 1, color: "#333" } },
+        itemStyle: { color: P.up, color0: P.dn, borderColor: P.up, borderColor0: P.dn } },
+      ...P.ma.map(([key, c]) => ({ name: key.toUpperCase(), type: "line", data: ind[key], showSymbol: false, lineStyle: { width: 1, color: c } })),
+      { name: "MACD", type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: macd.map(v => v == null ? null : { value: v, itemStyle: { color: v >= 0 ? P.up : P.dn } }) },
+      { name: "DIF", type: "line", xAxisIndex: 1, yAxisIndex: 1, data: ind.dif, showSymbol: false, lineStyle: { width: 1, color: P.dif } },
       { name: "DEA", type: "line", xAxisIndex: 1, yAxisIndex: 1, data: ind.dea, showSymbol: false, lineStyle: { width: 1, color: "#e6a23c" } },
+    ],
+  };
+}
+
+// 放大视图专用：在 kOpt 结果上补一条底部横向缩放轴（拖两端看更多/更少K线），
+// 同时把副图改成 top+bottom 定位，给滑块和日期轴标签留出空间（卡片小图仍不带滑块）
+function withSlider(opt) {
+  const Z = chartPal().zoom;
+  const z = opt.dataZoom[0];
+  return {
+    ...opt,
+    grid: [opt.grid[0], { ...opt.grid[1], top: "64%", bottom: 58 }],
+    dataZoom: [
+      { ...z },
+      { type: "slider", xAxisIndex: [0, 1], left: 44, right: 48, bottom: 4, height: 20,
+        borderColor: Z.border, backgroundColor: Z.bg, fillerColor: Z.filler,
+        handleStyle: { color: "#f99502", borderColor: "#f99502" }, moveHandleSize: 0, showDetail: false,
+        textStyle: { color: Z.tx, fontSize: 10 },
+        dataBackground: { lineStyle: { color: Z.line }, areaStyle: { color: Z.area } },
+        selectedDataBackground: { lineStyle: { color: Z.selLine }, areaStyle: { color: "rgba(249,149,2,.12)" } } },
     ],
   };
 }
@@ -427,6 +668,7 @@ function lineOpt(pts, base) {
   base = base || ys[0] || 1;  // 分时%基准：昨收，缺省用首价
   return {
     animation: false,
+    backgroundColor: "transparent",  // 同 kOpt：画布透明，用深色卡片底
     // 同 K 线：只要三轴指针标签，不要白色浮窗
     tooltip: { trigger: "axis", showContent: false, axisPointer: { type: "cross" } },
     grid: { left: 44, right: 48, top: 8, bottom: 20 },
@@ -443,7 +685,287 @@ function lineOpt(pts, base) {
   };
 }
 
-function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade }) {
+// ==================== 画线：趋势线 / 水平线 ====================
+// 数据 {id, kind:"trend"|"h", pts:[{x:类目, y:价格}]}；所有线合并成一条 id=__drawings 的折线 series，
+// 段与段之间用 null 断开——缩放/刷新时随 K 线自动跟随，删除时整条 series 重算即可。
+// 画线模式下单击=水平线（横贯当前窗口）、拖拽=任意角度斜线；点击线=选中（加粗高亮），选中后：按住线身=整条线平移、拖两端白心圆点=单独挪这一端（水平线拖一端即变斜线）、Delete/Backspace 删该线；右键点在线上=删该线；提示条上的清空=删当前标的+周期全部线
+// 画线配色也跟主题走：建图时由 createDrawings 从 CSS 变量同步（对象就地改值，图内各处按引用取用）
+const DRAW_STYLE = { color: "", width: 1 };  // 黄色半透明 1px
+const DRAW_SEL = { color: "", width: 2.5 };  // 选中线：加粗 + 实色橙，叠在原线之上
+
+function createDrawings(chart, opt) {
+  DRAW_STYLE.color = chartPal().draw;
+  DRAW_SEL.color = chartPal().drawSel;
+  const st = { mode: false, rows: [], lines: [], seg: [], drag: null, cur: "", vkey: "", sel: null, zlock: null };
+  const zr = chart.getZr();
+  let down = null, last = null;
+
+  // 当前 dataZoom 可视区首末类别：h 线的两端手柄必须落在窗口内才拖得到（缩放后也不会跑到画外）
+  const viewEnds = () => {
+    if (st.vends !== undefined) return st.vends;
+    const n = st.rows.length;
+    if (!n) return (st.vends = null);
+    const dz = (chart.getOption().dataZoom || [])[0] || {};
+    let i0 = 0, i1 = n - 1;
+    if (dz.startValue != null || dz.endValue != null) {
+      const a = st.rows.findIndex(r => r[0] === dz.startValue);
+      const b = st.rows.findIndex(r => r[0] === dz.endValue);
+      if (a >= 0) i0 = a;
+      if (b >= 0) i1 = b;
+    } else if (dz.start != null || dz.end != null) {
+      i0 = Math.round((+dz.start || 0) / 100 * (n - 1));
+      i1 = Math.round((dz.end != null ? +dz.end : 100) / 100 * (n - 1));
+    }
+    i0 = Math.min(Math.max(i0, 0), n - 1);
+    i1 = Math.min(Math.max(i1, i0), n - 1);
+    st.vends = [st.rows[i0][0], st.rows[i1][0]];
+    return st.vends;
+  };
+  // 线的两个端点：h 线横贯当前窗口（可视区首末类目同一价格），trend 取自己存的两点
+  const endsOf = l => {
+    const pts = l.pts || [];
+    if (l.kind === "h") {
+      if (!pts.length) return null;
+      const v = viewEnds();
+      return v ? [[v[0], pts[0].y], [v[1], pts[0].y]] : null;
+    }
+    return pts.length >= 2 ? [[pts[0].x, pts[0].y], [pts[1].x, pts[1].y]] : null;
+  };
+  const pxOf = p => {
+    const v = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [p[0], p[1]]);
+    return v && isFinite(v[0]) && isFinite(v[1]) ? v : null;
+  };
+  // 命中端点手柄（9px 内）→ {id, idx, pts}：按住圆点拖动 = 挪这一端；画线模式下全图可拖，否则抓中即选中该线
+  const hitHandle = (mx, my) => {
+    let best = null, bd = 9;
+    st.lines.forEach(l => {
+      const e = endsOf(l);
+      if (!e) return;
+      e.forEach((p, idx) => {
+        const c = pxOf(p);
+        if (!c) return;
+        const d = Math.hypot(c[0] - mx, c[1] - my);
+        if (d <= bd) { bd = d; best = { id: l.id, idx, pts: e.map(q => ({ x: q[0], y: q[1] })) }; }
+      });
+    });
+    return best;
+  };
+  const setCur = c => { if (st.cur !== c) { st.cur = c; zr.setCursorStyle(c); } };
+
+  // 点到线段的像素距离：6px 内算点中，用于单击选中线
+  const distToSeg = (px, py, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const L = dx * dx + dy * dy;
+    let t = L ? ((px - a[0]) * dx + (py - a[1]) * dy) / L : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy));
+  };
+  const hitLine = (mx, my) => {
+    if (!st.rows.length) return null;
+    let best = null, bd = 6;
+    st.lines.forEach(l => {
+      const e = endsOf(l);
+      if (!e) return;
+      const a = pxOf(e[0]), b = pxOf(e[1]);
+      if (!a || !b) return;
+      const d = distToSeg(mx, my, a, b);
+      if (d <= bd) { bd = d; best = l.id; }
+    });
+    return best;
+  };
+
+  const render = () => {
+    const data = [], seg = [], hd = [];
+    let selData = [];
+    // 拖动中：这条线按草稿出图（端点拖拽=trend，整线平移保留原 kind），松手才落库
+    const lines = st.drag ? st.lines.map(l => l.id === st.drag.id ? { id: l.id, kind: st.drag.kind, pts: st.drag.pts } : l) : st.lines;
+    if (st.sel != null && !lines.some(l => l.id === st.sel)) st.sel = null;  // 选中的线已被删：清掉选中态
+    if (st.rows.length) {
+      lines.forEach(l => {
+        const e = endsOf(l);
+        if (!e) return;
+        const i0 = data.length;
+        data.push(e[0], e[1], null);  // null 断段：多条线共用一条 series
+        seg.push({ id: l.id, from: i0, to: i0 + 1 });
+        if (st.mode || l.id === st.sel) hd.push(e[0], e[1]);  // 端点手柄：画线模式全部、否则只给选中的线
+        if (l.id === st.sel) selData = [e[0], e[1]];  // 选中线叠一条加粗高亮
+      });
+    }
+    st.seg = seg;
+    chart.setOption({ series: [{
+      id: "__drawings", type: "line", xAxisIndex: 0, yAxisIndex: 0, z: 10,
+      data, showSymbol: false, triggerLineEvent: true, animation: false,
+      lineStyle: DRAW_STYLE, itemStyle: { color: DRAW_STYLE.color },
+    }, {
+      id: "__drawh", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, z: 30, clip: false,
+      data: hd, symbol: "circle", symbolSize: 8, silent: true, animation: false,
+      tooltip: { show: false },
+      itemStyle: { color: "#fff", borderColor: st.mode ? DRAW_STYLE.color : DRAW_SEL.color, borderWidth: 1.5 },
+    }, {
+      id: "__drawsel", type: "line", xAxisIndex: 0, yAxisIndex: 0, z: 11, silent: true, animation: false,
+      data: selData, showSymbol: false, triggerLineEvent: false,
+      lineStyle: DRAW_SEL,
+    }] });
+    // 画线模式或已选中线：锁住缩放/平移，否则拖端点会连同鼠标一起把图拖走
+    const zl = st.mode || st.sel != null;
+    if (st.zlock !== zl) { st.zlock = zl; chart.setOption({ dataZoom: [{ disabled: zl }] }); }
+  };
+
+  const toPoint = (px, py) => {
+    const v = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [px, py]);
+    if (!v) return null;
+    const i = Math.round(v[0]), y = +v[1];
+    if (!(i >= 0 && i < st.rows.length) || !(y > 0)) return null;
+    return { x: st.rows[i][0], y: +y.toFixed(3) };
+  };
+
+  // 拖拽预览：按下后虚线实时跟随鼠标，松手才落成正式线（斜线角度一眼可见）
+  const preview = (a, b) => {
+    const p = toPoint(a[0], a[1]), q = toPoint(b[0], b[1]);
+    chart.setOption({ series: [{
+      id: "__drawprev", type: "line", xAxisIndex: 0, yAxisIndex: 0, z: 20, silent: true, animation: false,
+      data: p && q ? [[p.x, p.y], [q.x, q.y]] : [], showSymbol: false,
+      lineStyle: { color: DRAW_STYLE.color, width: 1, type: "dashed" },
+    }] });
+  };
+  const clearPreview = () => chart.setOption({ series: [{ id: "__drawprev", data: [] }] });
+  const finish = (nx, ny) => {
+    if (st.drag) {  // 端点拖拽收尾：有位移才落库（水平线拖一端即变斜线，两端高度可分别调）
+      const d = st.drag; st.drag = null;
+      if (!d.moved) { render(); return; }
+      // 不立即重绘：保持拖完的位置，等 setLines 回写后重绘；失败才按原线回滚
+      const pr = opt.onUpdate(d.id, d.kind, d.pts);
+      if (pr && pr.catch) pr.catch(() => render());
+      return;
+    }
+    if (!st.mode || !down) return;
+    const [x0, y0] = down;
+    down = null;
+    clearPreview();
+    const a = toPoint(x0, y0);
+    if (!a) return;
+    if (Math.abs(nx - x0) < 3 && Math.abs(ny - y0) < 3) {  // 原地单击：点在线上=选中，空白处=画水平线
+      const hit = hitLine(nx, ny);
+      if (hit != null) { st.sel = hit; render(); return; }
+      opt.onAdd("h", [a]);
+      return;
+    }
+    const b = toPoint(nx, ny);
+    if (b && !(b.x === a.x && Math.abs(b.y - a.y) < 1e-6)) opt.onAdd("trend", [a, b]);  // 任意角度（含竖线）
+  };
+
+  zr.on("mousedown", e => {
+    if (e.which && e.which !== 1) return;  // 只响应左键，右键留给删线
+    const h = hitHandle(e.offsetX, e.offsetY);  // 端点优先：抓住圆点=挪这一端，并顺手选中该线
+    if (h) { st.sel = h.id; st.drag = { id: h.id, kind: "trend", idx: h.idx, pts: h.pts, moved: false }; down = null; render(); return; }
+    if (!st.mode) {
+      // 已选中的线：按住线身=整条线平移（两端一起跟手）；未选中的线先交给 click 去选中
+      if (st.sel != null && hitLine(e.offsetX, e.offsetY) === st.sel) {
+        const l = st.lines.find(x => x.id === st.sel);
+        const v = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [e.offsetX, e.offsetY]);
+        if (l && v && l.pts && l.pts.length) {
+          const isH = l.kind === "h";
+          const pts = isH ? [{ x: l.pts[0].x, y: l.pts[0].y }] : (endsOf(l) || []).map(q => ({ x: q[0], y: q[1] }));
+          const ii = isH ? null : pts.map(q => st.rows.findIndex(r => r[0] === q.x));
+          st.drag = { id: l.id, kind: l.kind, idx: null, pts, base: pts.map(q => ({ ...q })), moved: false,
+                      i0: v[0], y0: +v[1], ii: ii && ii.every(k => k >= 0) ? ii : null };
+          down = null; render(); return;
+        }
+      }
+      return;  // 没抓到端点也没按住已选中的线：交还给缩放/平移
+    }
+    down = [e.offsetX, e.offsetY];
+    last = down;
+  });
+  zr.on("mousemove", e => {
+    last = [e.offsetX, e.offsetY];
+    if (st.drag) {
+      const d = st.drag;
+      if (d.idx == null) {  // 整条线平移：两端按同一位移跟手（x 按类目吸整、y 按价格）
+        const v = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [e.offsetX, e.offsetY]);
+        if (v) {
+          const dy = +v[1] - d.y0;
+          let di = 0;
+          if (d.ii) {
+            di = Math.round(v[0] - d.i0);
+            const lo = Math.min(...d.ii), hi = Math.max(...d.ii);
+            di = Math.min(Math.max(di, -lo), st.rows.length - 1 - hi);  // 两端不能挪出数据范围
+          }
+          d.pts = d.base.map((p, k) => ({
+            x: d.ii ? st.rows[d.ii[k] + di][0] : p.x,
+            y: +Math.max(0.001, p.y + dy).toFixed(3),
+          }));
+          d.moved = true;
+          render();
+        }
+        return;
+      }
+      const p = toPoint(e.offsetX, e.offsetY);
+      if (p) { d.pts[d.idx] = p; d.moved = true; render(); }
+      return;
+    }
+    if (!st.mode) {
+      setCur(hitHandle(e.offsetX, e.offsetY) ? "ns-resize" : hitLine(e.offsetX, e.offsetY) != null ? (st.sel != null ? "move" : "pointer") : "default");
+      return;
+    }
+    if (down) preview(down, last);
+    else setCur(hitHandle(e.offsetX, e.offsetY) ? "ns-resize" : "crosshair");
+  });
+  zr.on("click", e => {  // 非画线模式：点线=选中，点空白=取消（画线模式的选中在 finish 里做，不重复）
+    if (st.mode) return;
+    const hit = hitLine(e.offsetX, e.offsetY);
+    if (hit !== st.sel) { st.sel = hit; render(); }
+  });
+  zr.on("mouseup", e => finish(e.offsetX, e.offsetY));
+  const onWinUp = () => { if (st.drag || (down && last)) finish(last[0], last[1]); };  // 拖到画布外松手也能落线
+  window.addEventListener("mouseup", onWinUp);
+  chart.on("contextmenu", p => {  // 右键线删除
+    if (p.seriesId !== "__drawings") return;
+    const s = st.seg.find(v => p.dataIndex >= v.from && p.dataIndex <= v.to);
+    if (s) opt.onDel(s.id);
+  });
+  const onKey = e => {  // Delete/Backspace 删选中的线（焦点在输入框时不拦截，避免删字变删线）
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    if (st.sel == null) return;
+    const ae = document.activeElement;
+    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+    const id = st.sel; st.sel = null;
+    opt.onDel(id);
+    e.preventDefault();
+  };
+  window.addEventListener("keydown", onKey);
+  const onDocDown = e => {  // 点到本图以外：取消选中，避免多张卡同时持有选中态
+    if (st.sel == null || chart.getDom().contains(e.target)) return;
+    st.sel = null; render();
+  };
+  document.addEventListener("mousedown", onDocDown, true);
+  chart.getDom().addEventListener("contextmenu", e => e.preventDefault());  // 不让浏览器右键菜单挡住删线
+  const onZoom = () => {  // 缩放/平移后重新对齐 h 线的窗口端点与手柄
+    st.vends = undefined;
+    const v = viewEnds(), key = v ? v.join("|") : "";
+    if (key === st.vkey) return;  // 窗口没变就不重绘，防止自触发循环
+    st.vkey = key; render();
+  };
+  chart.on("dataZoom", onZoom);
+  chart.on("datazoom", onZoom);  // 事件名两种写法都挂上，避免版本差异导致不触发
+
+  return {
+    destroy() {
+      window.removeEventListener("mouseup", onWinUp);
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDocDown, true);
+    },
+    setMode(on) {
+      st.mode = on;
+      setCur(on ? "crosshair" : "default");
+      render();  // 模式切换：开=全部线显示端点手柄；缩放锁在 render 里同步
+    },
+    setRows(rows) { st.rows = rows || []; st.vends = undefined; render(); },
+    setLines(lines) { st.lines = lines || []; render(); },
+  };
+}
+
+function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade, theme }) {
   const ref = useRef();
   const tradeRef = useRef();  // 交易行（含气泡）引用：用于判断气泡外点击
   const [err, setErr] = useState("");
@@ -461,8 +983,40 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   const zref = useRef();
   const [zload, setZload] = useState(false);
   const [zerr, setZerr] = useState("");
+  // 画线：lines 按「标的+周期」从后端取；drawOn=画线模式；ctlRef/ztlRef 分别是卡片图/放大图的控制器
+  const [lines, setLines] = useState([]);
+  const [drawOn, setDrawOn] = useState(false);
+  const ctlRef = useRef(null), zctlRef = useRef(null);
+  const dref = useRef({ lines: [], on: false });
+  dref.current.lines = lines; dref.current.on = drawOn;
   useEffect(() => {
-    const chart = echarts.init(ref.current);
+    let dead = false;
+    getJSON(`/api/drawings?symbol=${symbol}&period=${period}`)
+      .then(d => { if (!dead) setLines(d.items || []); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [symbol, period]);
+  useEffect(() => {  // 线增删或模式切换：同步给卡片图和放大图
+    [ctlRef, zctlRef].forEach(r => { const c = r.current; if (c) c.setLines(lines); });
+  }, [lines]);
+  useEffect(() => {
+    [ctlRef, zctlRef].forEach(r => { const c = r.current; if (c) c.setMode(drawOn); });
+  }, [drawOn]);
+  const clearLines = () => {  // 清空当前标的+周期的全部线（后端删库，前端立即清屏）
+    setLines([]);
+    fetch(API_BASE + `/api/drawings?symbol=${symbol}&period=${period}`, { method: "DELETE" }).catch(() => {});
+  };
+  const drawApi = {  // 画线增/删/改：落库成功后回写 state，图随 state 重绘
+    onAdd: (kind, pts) => sendJSON("/api/drawings", "POST", { symbol, period, kind, pts })
+      .then(d => setLines(v => [...v, d.item])).catch(() => {}),
+    onDel: id => fetch(API_BASE + "/api/drawings/" + id, { method: "DELETE" })
+      .then(() => setLines(v => v.filter(x => x.id !== id))).catch(() => {}),
+    onUpdate: (id, kind, pts) => sendJSON("/api/drawings/" + id, "PUT", { kind, pts })  // 拖端点改两端高度
+      .then(d => setLines(v => v.map(x => x.id === id ? d.item : x)))
+      .catch(e => { setLines(v => v.slice()); throw e; }),  // 失败：换新数组触发按原线重绘（回滚）
+  };
+  useEffect(() => {
+    const chart = echarts.init(ref.current, theme === "dark" ? "dark" : null);  // 亮色用 ECharts 默认主题，暗色用内置 dark（坐标轴/分割线自动跟色）
     let dead = false;
     setErr(""); setLoading(true); setDayPx(null);
     (async () => {
@@ -476,6 +1030,11 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
           const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
           const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
           chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
+          const ctl = createDrawings(chart, drawApi);
+          ctlRef.current = ctl;
+          ctl.setRows(d.klines || []);
+          ctl.setLines(dref.current.lines);
+          ctl.setMode(dref.current.on);
           const tail = d.tail || [];  // 截止日收盘：不晚于结束日期的最后两根K线（区间落在周末等非交易日、图内为空时也能取到"当日价"）
           if (dend && tail.length >= 2)
             setDayPx({ price: +tail[tail.length - 1][2], prev: +tail[tail.length - 2][2] });
@@ -485,8 +1044,8 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
     })();
     const onRs = () => chart.resize();
     window.addEventListener("resize", onRs);
-    return () => { dead = true; window.removeEventListener("resize", onRs); chart.dispose(); };
-  }, [symbol, period, dstart, dend]);
+    return () => { dead = true; if (ctlRef.current) ctlRef.current.destroy(); ctlRef.current = null; window.removeEventListener("resize", onRs); chart.dispose(); };
+  }, [symbol, period, dstart, dend, theme]);  // theme 变化：重建图表以换上当前主题的配色
   // 买卖气泡：点气泡外或按 Esc 关闭（两个买卖按钮在 tradeRef 内，点按钮不触发外部关闭，由按钮自己切换）
   useEffect(() => {
     if (!form) return;
@@ -533,7 +1092,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   // —— 放大视图：独立大图弹层，取数与卡片同口径（day5 占位/分时 lineOpt/其余 kOpt），Esc/遮罩/✕ 关闭 ——
   useEffect(() => {
     if (!zoom) return;
-    const chart = echarts.init(zref.current);
+    const chart = echarts.init(zref.current, theme === "dark" ? "dark" : null);
     let dead = false;
     setZerr(""); setZload(true);
     (async () => {
@@ -546,15 +1105,20 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
         } else {
           const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
           const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
-          chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
+          chart.setOption(withSlider(kOpt(d, Boolean(dstart || dend))), true);
+          const ctl = createDrawings(chart, drawApi);
+          zctlRef.current = ctl;
+          ctl.setRows(d.klines || []);
+          ctl.setLines(dref.current.lines);
+          ctl.setMode(dref.current.on);
         }
       } catch (e) { if (!dead) setZerr(String(e.message || e)); }
       finally { if (!dead) setZload(false); }
     })();
     const onRs = () => chart.resize();
     window.addEventListener("resize", onRs);
-    return () => { dead = true; window.removeEventListener("resize", onRs); chart.dispose(); };
-  }, [zoom, symbol, period, dstart, dend]);
+    return () => { dead = true; if (zctlRef.current) zctlRef.current.destroy(); zctlRef.current = null; window.removeEventListener("resize", onRs); chart.dispose(); };
+  }, [zoom, symbol, period, dstart, dend, theme]);
   useEffect(() => {
     if (!zoom) return;
     const onKey = e => e.key === "Escape" && setZoom(false);
@@ -576,6 +1140,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   return html`<div className="card"
     onDragOver=${e => e.preventDefault()}
     onDrop=${() => onDropCard(index)}>
+    ${period !== "min" && period !== "day5" && html`<button className=${"del drbtn" + (drawOn ? " on" : "")} title="画线：单击画水平线，拖拽画斜线，拖线两端圆点调高度，点线选中后按 Delete 删除；右键线删除" onClick=${() => setDrawOn(v => !v)}><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 10l.7-2.6L8 2.1l1.9 1.9-5.3 5.3L2 10z" fill="none" stroke="currentColor" strokeWidth="1.2"/></svg></button>`}
     <button className="del zbtn" title="放大" onClick=${() => setZoom(true)}><svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 5V1h4M7 1h4v4M11 7v4H7M5 11H1V7" fill="none" stroke="currentColor" strokeWidth="1.4"/></svg></button>
     <button className="del" title="删除卡片" onClick=${() => onDelete(symbol)}>✕</button>
     <div className="hd">
@@ -599,7 +1164,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
           ${form && html`<div className="pop">
             <div className="prow">
               <label>${form === "buy" ? "买入时间" : "卖出时间"}</label>
-              <input type="datetime-local" value=${ftime} onChange=${e => setFtime(e.target.value)} />
+              <input type="datetime-local" value=${ftime} max=${nowLocal()} onChange=${e => setFtime(e.target.value)} />
             </div>
             <div className="prow">
               <label>价格</label>
@@ -611,6 +1176,9 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
               <input type="number" step="any" min="0" max=${qmax != null ? String(qmax) : undefined} className=${qOver ? "over" : ""} value=${fqty} onChange=${e => onQty(e.target.value)} placeholder="数量" title=${qmax != null ? "最多可卖 " + qmax : undefined} />
               <button className="step" disabled=${busy || (qmax != null && q >= qmax)} onClick=${() => stepQty(1)}>＋</button>
             </div>
+            ${qmax != null && html`<div className="prow" style=${{ marginTop: "-4px" }}>
+              <label style=${{ width: "auto", fontSize: "11px", color: cssVar("--tx-4") }}>可卖 ${sellable} 股 / 持仓 ${holding ? holding.shares : 0} 股（数量已默认填满可卖）</label>
+            </div>`}
             <div className="prow">
               <label>总价</label>
               <b className="amt">${famtShow}</b>
@@ -618,13 +1186,14 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
             ${terr && html`<span className="terr">${terr}</span>`}
             <div className="pact">
               <button className="tbn ok" disabled=${busy} onClick=${submitTrade}>${busy ? "提交中…" : "确认"}</button>
-              <button className="tbn" style=${{ borderColor: "#d9d9de", color: "#999", background: "#fff" }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
+              <button className="tbn" style=${{ borderColor: cssVar("--bd-1c"), color: cssVar("--tx-4"), background: cssVar("--bg-card") }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
             </div>
           </div>`}
         </div>
       </div>
     </div>
     <div className="chart" ref=${ref}></div>
+    ${drawOn && html`<div className="drtip">单击画线 · 拖拽画斜线 · 点线后：拖线身整条挪、拖圆点调两端、Delete 删除${lines.length > 0 && html`<button onClick=${clearLines}>清空</button>`}</div>`}
     ${loading && !err && html`<div className="ld">加载中…</div>`}
     ${err && html`<div className="err">${err}</div>`}
     ${zoom && html`<div className="zmask" onClick=${() => setZoom(false)}>
@@ -633,11 +1202,14 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
           <b>${name}</b>
           <span style=${{ opacity: .55, fontSize: 12 }}>${symbol} · ${(TABS.find(t => t[0] === period) || ["", ""])[1]}</span>
           ${px != null && chg != null && html`<span className="px">${px}</span><span className=${chg > 0 ? "up" : chg < 0 ? "dn" : ""} style=${{ fontSize: 12, fontWeight: 600 }}>${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span>`}
+          <button className=${"zdraw" + (drawOn ? " on" : "")} title="画线：单击画水平线，拖拽画斜线，拖线两端圆点调高度，点线选中后按 Delete 删除；右键线删除" onClick=${() => setDrawOn(v => !v)}>画线</button>
+          <button className="zdelcard" title="删除这张卡片：库里该行一并删除，主页面同步移除" onClick=${() => onDelete(symbol)}>删除卡片</button>
           <button className="zclose" title="关闭" onClick=${() => setZoom(false)}>✕</button>
         </div>
         <div className="zchart" ref=${zref}></div>
+        ${drawOn && html`<div className="drtip" style=${{ bottom: 26 }}>单击画线 · 拖拽画斜线 · 点线后：拖线身整条挪、拖圆点调两端、Delete 删除${lines.length > 0 && html`<button onClick=${clearLines}>清空</button>`}</div>`}
         ${zload && !zerr && html`<div className="znote">加载中…</div>`}
-        ${zerr && html`<div className="znote" style=${{ color: "#e64340" }}>${zerr}</div>`}
+        ${zerr && html`<div className="znote" style=${{ color: cssVar("--up") }}>${zerr}</div>`}
       </div>
     </div>`}
   </div>`;
@@ -646,7 +1218,7 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
 // 全部收益抽屉（hist）：右侧滑出。持仓/订单/已实现收益/可用资金均随回放视点截断（as_of）；
 // 持仓 tab 价格锚定视点：选了结束日期用截止日收盘（dayPx 与卡片同源），无则批量报价实时算
 // 标题右侧灰色小字显示筛选结束日期（即回放视点），未选结束日期时不显示
-function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTotal, account, onDelOrder, onDelHolding, onClose }) {
+function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTotal, account, onDelOrder, onDelHolding, onClearOrders, onClose }) {
   const [tab, setTab] = useState("hold");
   useEffect(() => {  // Esc 关闭，同时锁住页面滚动
     const onKey = e => e.key === "Escape" && onClose();
@@ -660,13 +1232,17 @@ function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTot
   // 价格锚定回放视点：选了结束日期只用截止日收盘（dayPx 与卡片同源），未取到/无数据显示 —，绝不回落实时报价
   // （历史视点混入当前价格会算出假盈亏）；无结束日期用实时报价。全部持仓行都列出，
   // 汇总只统计有价的行；全部收益% = 总盈亏 / 总成本（与原汇总条口径一致）
+  // 「买入时间」列显示最后一次买入（仅展示层口径：从订单流水取每标的最近一笔买入；后端 buy_ts 仍为建仓首笔不动）
+  const lastBuy = {};
+  orders.forEach(o => { if (o.side === "buy" && (!lastBuy[o.symbol] || o.ts > lastBuy[o.symbol])) lastBuy[o.symbol] = o.ts; });
   const rows = Object.entries(holdings).map(([s, h]) => ({ s, ...h, p: dayPx[s] ? dayPx[s].price : (dend ? null : (quotes[s] ? quotes[s].price : null)) }));
   const valid = rows.filter(x => x.p != null);
   const tCost = valid.reduce((a, x) => a + x.shares * x.cost, 0);
   const tMv = valid.reduce((a, x) => a + x.shares * x.p, 0);
   const tFloat = tMv - tCost;                // 浮动盈亏
   const tPl = tFloat + realizedTotal;        // 全部收益 = 浮动 + 已实现（卖出落袋）
-  const tPct = tCost ? tPl / tCost * 100 : 0;
+  // 全部收益% 分母=本金：已实现收益对应的本金已卖出回笼、不在当前持仓成本里，只除 tCost 会把已卖部分基数丢掉、百分比虚大数倍
+  const tPct = account && account.capital ? tPl / account.capital * 100 : (tCost ? tPl / tCost * 100 : 0);
   return html`<div className="drawer-mask" onClick=${onClose}>
     <div className="drawer" onClick=${e => e.stopPropagation()}>
       <div className="dhd">
@@ -685,6 +1261,7 @@ function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTot
             ${account && html`<span>总资产<b>${(account.cash + tMv).toFixed(2)}</b></span><span>可用资金<b>${account.cash.toFixed(2)}</b></span>`}
             <span>总市值<b>${tMv.toFixed(2)}</b></span>
             <span>总成本<b>${tCost.toFixed(2)}</b></span>
+            ${orders.length > 0 && html`<button className="dclr" title="清空历史回放+实时跟随两视图全部买卖流水：收益归0、总资产/可用资金回到本金（不可恢复）" onClick=${onClearOrders}>清空收益</button>`}
           </div>
           <div className="hhd"><span>名称</span><span>现价</span><span>成本</span><span>数量</span><span title="A股当日买入的份额次日可卖（T+1）">可卖</span><span>市值</span><span>盈亏金额</span><span>盈亏%</span><span>买入时间</span><span>删除</span></div>
           ${rows.map(x => {
@@ -699,12 +1276,13 @@ function TotalDrawer({ holdings, quotes, dayPx, dend, cards, orders, realizedTot
               <span>${x.p != null ? (x.shares * x.p).toFixed(2) : "—"}</span>
               <span className="hpl">${pl != null ? html`<b className=${pl >= 0 ? "up" : "dn"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b>` : "—"}</span>
               <span className="hpp">${plp != null ? html`<span className=${plp >= 0 ? "up" : "dn"}>${plp >= 0 ? "+" : ""}${plp.toFixed(2)}%</span>` : "—"}</span>
-              <span className="hbt">${x.buy_ts ? html`${x.buy_ts.slice(0, 10)}<i>${x.buy_ts.slice(11)}</i>` : "—"}</span>
+              <span className="hbt">${(lastBuy[x.s] || x.buy_ts) ? html`${(lastBuy[x.s] || x.buy_ts).slice(0, 10)}<i>${(lastBuy[x.s] || x.buy_ts).slice(11)}</i>` : "—"}</span>
               <button className="odel" title="删除此持仓：该标的全部买卖流水一并清除" onClick=${() => onDelHolding(x.s)}>✕</button>
             </div>`;
           })}
         </div>` : html`<div>
-          ${orders.length ? html`${orders.map(o => html`<div className="orow" key=${o.id}>
+          ${orders.length ? html`<button className="dclr" title="清空历史回放+实时跟随两视图全部买卖流水：持仓清零、收益归0、总资产/可用资金回到本金（不可恢复）" onClick=${onClearOrders}>清空全部订单</button>
+            ${orders.map(o => html`<div className="orow" key=${o.id}>
             <b className=${"act " + (o.side === "buy" ? "up" : "dn")}>${o.side === "buy" ? "买入" : "卖出"}</b>
             <span className="onm">${o.name}</span>
             <span className="ocode">${o.symbol}</span>
@@ -726,7 +1304,8 @@ const GTABS = [["min", "分时"], ["day5", "5日"], ["m5", "5分"], ["m30", "30�
 const PAGES = [["hist", "历史模拟仓"], ["live", "实时跟随仓"]];  // 页面级Tab：hist=历史模拟仓（原表、原class）；live=实时跟随仓（表加 _live、class 加 -live，实现见下方克隆区）
 
 // 日期选择器（历史仓）：点按钮弹出自绘日历浮层——原生 date 输入无法把特定日期置灰禁用；
-// 周六/周日格子置灰且不可点，value 为空时按钮显示占位文字，选中日期回调 onPick("YYYY-MM-DD") 并收起；
+// 周六/周日、以及晚于今天的未来日期一律置灰且不可点（截止日最晚到当下），value 为空时按钮显示占位文字，
+// 选中日期回调 onPick("YYYY-MM-DD") 并收起；
 // 点标题「2026年9月」上翻到选月视图、再点「2026年」上翻到选年视图（‹/›：日视图翻月、月视图翻年、年视图翻12年）
 function DP({ value, onPick, title }) {
   const [open, setOpen] = useState(false);
@@ -739,7 +1318,9 @@ function DP({ value, onPick, title }) {
     const [y, m] = vym.split("-").map(Number);
     const t = view === "year" ? new Date(y + delta * 12, m - 1, 1)
       : new Date(y, m - 1 + (view === "month" ? delta * 12 : delta), 1);
-    setVym(`${t.getFullYear()}-${pad2(t.getMonth() + 1)}`);
+    const nv = `${t.getFullYear()}-${pad2(t.getMonth() + 1)}`;
+    if (nv > today.slice(0, 7)) return;  // 未来月份/年份不再后翻：截止日不得晚于今天
+    setVym(nv);
   };
   let panel = null;
   if (open) {
@@ -749,16 +1330,18 @@ function DP({ value, onPick, title }) {
       head = html`<b>${y - 5}年 - ${y + 6}年</b>`;
       body = html`<div className="dp-ym">
         ${Array.from({ length: 12 }, (_, i) => { const yy = y - 5 + i;
+          const fut = String(yy) > today.slice(0, 4);  // 未来年份：禁用置灰
           const cls = "dp-d" + (String(yy) === value.slice(0, 4) ? " sel" : "") + (String(yy) === today.slice(0, 4) ? " td" : "");
-          return html`<button key=${yy} className=${cls}
+          return html`<button key=${yy} className=${cls} disabled=${fut}
             onClick=${() => { setVym(`${yy}-${pad2(m)}`); setView("month"); }}>${yy}</button>`; })}
       </div>`;
     } else if (view === "month") {  // 选月：点某月回日历视图
       head = html`<b onClick=${() => setView("year")}>${y}年</b>`;
       body = html`<div className="dp-ym">
         ${Array.from({ length: 12 }, (_, i) => { const ym = `${y}-${pad2(i + 1)}`;
+          const fut = ym > today.slice(0, 7);  // 未来月份：禁用置灰
           const cls = "dp-d" + (ym === value.slice(0, 7) ? " sel" : "") + (ym === today.slice(0, 7) ? " td" : "");
-          return html`<button key=${ym} className=${cls}
+          return html`<button key=${ym} className=${cls} disabled=${fut}
             onClick=${() => { setVym(ym); setView("day"); }}>${i + 1}月</button>`; })}
       </div>`;
     } else {  // 日历：周六/周日置灰且不可点
@@ -772,8 +1355,9 @@ function DP({ value, onPick, title }) {
           ${Array.from({ length: days }, (_, i) => {
             const ds = `${y}-${pad2(m)}-${pad2(i + 1)}`;
             const wk = (first + i) % 7 >= 5;  // 周六/周日：禁用置灰
+            const fut = ds > today;            // 未来日期：禁用置灰（截止日最晚到当下）
             const cls = "dp-d" + (ds === value ? " sel" : "") + (ds === today ? " td" : "");
-            return html`<button key=${ds} className=${cls} disabled=${wk}
+            return html`<button key=${ds} className=${cls} disabled=${wk || fut}
               onClick=${() => { onPick(ds); setOpen(false); }}>${i + 1}</button>`;
           })}
         </div>
@@ -812,7 +1396,7 @@ async function saveCardsLive(list) {
   } catch (e) { console.error("卡片保存失败(live)", e); }
 }
 
-function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade }) {
+function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart, onDropCard, onDelete, quote, holding, onTrade, theme }) {
   const ref = useRef();
   const tradeRef = useRef();  // 交易行（含气泡）引用：用于判断气泡外点击
   const [err, setErr] = useState("");
@@ -826,8 +1410,36 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState("");
   const [dayPx, setDayPx] = useState(null);  // 选了结束日期时：截止日最后一根K线收盘与前一根收盘（当日股价/涨跌基准）
+  // 画线（live）：与历史页共用同一份线（按标的+周期存），控制器只管本卡图表
+  const [lines, setLines] = useState([]);
+  const [drawOn, setDrawOn] = useState(false);
+  const ctlRef = useRef(null);
+  const dref = useRef({ lines: [], on: false });
+  dref.current.lines = lines; dref.current.on = drawOn;
   useEffect(() => {
-    const chart = echarts.init(ref.current);
+    let dead = false;
+    getJSON(`/api/drawings?symbol=${symbol}&period=${period}`)
+      .then(d => { if (!dead) setLines(d.items || []); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [symbol, period]);
+  useEffect(() => { const c = ctlRef.current; if (c) c.setLines(lines); }, [lines]);
+  useEffect(() => { const c = ctlRef.current; if (c) c.setMode(drawOn); }, [drawOn]);
+  const clearLines = () => {  // 清空当前标的+周期的全部线（后端删库，前端立即清屏）
+    setLines([]);
+    fetch(API_BASE + `/api/drawings?symbol=${symbol}&period=${period}`, { method: "DELETE" }).catch(() => {});
+  };
+  const drawApi = {  // 画线增/删/改：落库成功后回写 state，图随 state 重绘
+    onAdd: (kind, pts) => sendJSON("/api/drawings", "POST", { symbol, period, kind, pts })
+      .then(d => setLines(v => [...v, d.item])).catch(() => {}),
+    onDel: id => fetch(API_BASE + "/api/drawings/" + id, { method: "DELETE" })
+      .then(() => setLines(v => v.filter(x => x.id !== id))).catch(() => {}),
+    onUpdate: (id, kind, pts) => sendJSON("/api/drawings/" + id, "PUT", { kind, pts })  // 拖端点改两端高度
+      .then(d => setLines(v => v.map(x => x.id === id ? d.item : x)))
+      .catch(e => { setLines(v => v.slice()); throw e; }),  // 失败：换新数组触发按原线重绘（回滚）
+  };
+  useEffect(() => {
+    const chart = echarts.init(ref.current, theme === "dark" ? "dark" : null);  // 亮色用 ECharts 默认主题，暗色用内置 dark（坐标轴/分割线自动跟色）
     let dead = false;
     setErr(""); setLoading(true); setDayPx(null);
     (async () => {
@@ -841,6 +1453,11 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
           const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
           const d = await getJSON(`/api/kline?symbol=${symbol}&period=${period}&limit=300${dr}`);
           chart.setOption(kOpt(d, Boolean(dstart || dend)), true);
+          const ctl = createDrawings(chart, drawApi);
+          ctlRef.current = ctl;
+          ctl.setRows(d.klines || []);
+          ctl.setLines(dref.current.lines);
+          ctl.setMode(dref.current.on);
           const tail = d.tail || [];  // 截止日收盘：不晚于结束日期的最后两根K线（区间落在周末等非交易日、图内为空时也能取到"当日价"）
           if (dend && tail.length >= 2)
             setDayPx({ price: +tail[tail.length - 1][2], prev: +tail[tail.length - 2][2] });
@@ -850,8 +1467,8 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
     })();
     const onRs = () => chart.resize();
     window.addEventListener("resize", onRs);
-    return () => { dead = true; window.removeEventListener("resize", onRs); chart.dispose(); };
-  }, [symbol, period, dstart, dend]);
+    return () => { dead = true; if (ctlRef.current) ctlRef.current.destroy(); ctlRef.current = null; window.removeEventListener("resize", onRs); chart.dispose(); };
+  }, [symbol, period, dstart, dend, theme]);  // theme 变化：重建图表以换上当前主题的配色
   // 买卖气泡：点气泡外或按 Esc 关闭（两个买卖按钮在 tradeRef 内，点按钮不触发外部关闭，由按钮自己切换）
   useEffect(() => {
     if (!form) return;
@@ -904,6 +1521,7 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
   return html`<div className="card-live"
     onDragOver=${e => e.preventDefault()}
     onDrop=${() => onDropCard(index)}>
+    ${period !== "min" && period !== "day5" && html`<button className=${"drbtn-live" + (drawOn ? " on-live" : "")} title="画线：单击画水平线，拖拽画斜线，拖线两端圆点调高度，点线选中后按 Delete 删除；右键线删除" onClick=${() => setDrawOn(v => !v)}><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 10l.7-2.6L8 2.1l1.9 1.9-5.3 5.3L2 10z" fill="none" stroke="currentColor" strokeWidth="1.2"/></svg></button>`}
     <button className="del-live" title="删除卡片" onClick=${() => onDelete(symbol)}>✕</button>
     <div className="hd-live">
       <span className="grip-live" draggable="true"
@@ -926,7 +1544,7 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
         ${form && html`<div className="pop-live">
           <div className="prow-live">
             <label>${form === "buy" ? "买入时间" : "卖出时间"}</label>
-            <input type="datetime-local" value=${ftime} onChange=${e => setFtime(e.target.value)} />
+            <input type="datetime-local" value=${ftime} max=${nowLocal()} onChange=${e => setFtime(e.target.value)} />
           </div>
           <div className="prow-live">
             <label>价格</label>
@@ -938,16 +1556,20 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
             <input type="number" step="any" min="0" max=${qmax != null ? String(qmax) : undefined} className=${qOver ? "over" : ""} value=${fqty} onChange=${e => setFqty(e.target.value)} placeholder="数量" title=${qmax != null ? "最多可卖 " + qmax : undefined} />
             <button className="step-live" disabled=${busy || (qmax != null && q >= qmax)} onClick=${() => stepQty(1)}>＋</button>
           </div>
+          ${qmax != null && html`<div className="prow-live" style=${{ marginTop: "-4px" }}>
+            <label style=${{ width: "auto", fontSize: "11px", color: cssVar("--tx-4") }}>可卖 ${sellable} 股 / 持仓 ${holding ? holding.shares : 0} 股（数量已默认填满可卖）</label>
+          </div>`}
           ${terr && html`<span className="terr-live">${terr}</span>`}
           <div className="pact-live">
             <button className="tbn-live ok-live" disabled=${busy} onClick=${submitTrade}>${busy ? "提交中…" : "确认"}</button>
-            <button className="tbn-live" style=${{ borderColor: "#d9d9de", color: "#999", background: "#fff" }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
+            <button className="tbn-live" style=${{ borderColor: cssVar("--bd-1c"), color: cssVar("--tx-4"), background: cssVar("--bg-card") }} disabled=${busy} onClick=${() => setForm(null)}>取消</button>
           </div>
         </div>`}
         </div>
       </div>
     </div>
     <div className="chart-live" ref=${ref}></div>
+    ${drawOn && html`<div className="drtip-live">单击画线 · 拖拽画斜线 · 点线后：拖线身整条挪、拖圆点调两端、Delete 删除${lines.length > 0 && html`<button onClick=${clearLines}>清空</button>`}</div>`}
     ${loading && !err && html`<div className="ld-live">加载中…</div>`}
     ${err && html`<div className="err-live">${err}</div>`}
   </div>`;
@@ -955,7 +1577,7 @@ function CardLive({ symbol, name, period, onPeriod, dstart, dend, index, onDragS
 
 // 全部收益抽屉：右侧滑出。持仓 tab 用 /api/holdings + 批量报价实时计算；订单 tab 用 /api/orders 真实流水（每笔 realized + 行删除）
 
-function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDelOrder, onDelHolding, onClose }) {
+function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, account, onDelOrder, onDelHolding, onClearOrders, onClose }) {
   const [tab, setTab] = useState("hold");
   useEffect(() => {  // Esc 关闭，同时锁住页面滚动
     const onKey = e => e.key === "Escape" && onClose();
@@ -967,13 +1589,17 @@ function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDel
   const names = {};
   cards.forEach(c => { names[c.symbol] = c.name; });
   // 全部持仓行都列出（无报价的列显示 —），汇总只统计有报价的行；全部收益% = 总盈亏 / 总成本（与原汇总条口径一致）
+  // 「买入时间」列显示最后一次买入（仅展示层口径：从订单流水取每标的最近一笔买入；后端 buy_ts 仍为建仓首笔不动）
+  const lastBuy = {};
+  orders.forEach(o => { if (o.side === "buy" && (!lastBuy[o.symbol] || o.ts > lastBuy[o.symbol])) lastBuy[o.symbol] = o.ts; });
   const rows = Object.entries(holdings).map(([s, h]) => ({ s, ...h, q: quotes[s] }));
   const valid = rows.filter(x => x.q);
   const tCost = valid.reduce((a, x) => a + x.shares * x.cost, 0);
   const tMv = valid.reduce((a, x) => a + x.shares * x.q.price, 0);
   const tFloat = tMv - tCost;                // 浮动盈亏
   const tPl = tFloat + realizedTotal;        // 全部收益 = 浮动 + 已实现（卖出落袋）
-  const tPct = tCost ? tPl / tCost * 100 : 0;
+  // 全部收益% 分母=本金：已实现收益对应的本金已卖出回笼、不在当前持仓成本里，只除 tCost 会把已卖部分基数丢掉、百分比虚大数倍
+  const tPct = account && account.capital ? tPl / account.capital * 100 : (tCost ? tPl / tCost * 100 : 0);
   return html`<div className="drawer-mask-live" onClick=${onClose}>
     <div className="drawer-live" onClick=${e => e.stopPropagation()}>
       <div className="dhd-live">
@@ -991,6 +1617,7 @@ function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDel
             ${realizedTotal !== 0 && html`<span>已实现<b className=${realizedTotal >= 0 ? "up-live" : "dn-live"}>${realizedTotal >= 0 ? "+" : ""}${realizedTotal.toFixed(2)}</b></span>`}
             <span>总市值<b>${tMv.toFixed(2)}</b></span>
             <span>总成本<b>${tCost.toFixed(2)}</b></span>
+            ${orders.length > 0 && html`<button className="dclr-live" title="清空历史回放+实时跟随两视图全部买卖流水：收益归0（不可恢复）" onClick=${onClearOrders}>清空收益</button>`}
           </div>
           <div className="hhd-live"><span>名称</span><span>现价</span><span>成本</span><span>数量</span><span title="A股当日买入的份额次日可卖（T+1）">可卖</span><span>市值</span><span>盈亏金额</span><span>盈亏%</span><span>买入时间</span><span>删除</span></div>
           ${rows.map(x => {
@@ -1005,12 +1632,13 @@ function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDel
               <span>${x.q ? (x.shares * x.q.price).toFixed(2) : "—"}</span>
               <span className="hpl-live">${pl != null ? html`<b className=${pl >= 0 ? "up-live" : "dn-live"}>${pl >= 0 ? "+" : ""}${pl.toFixed(2)}</b>` : "—"}</span>
               <span className="hpp-live">${plp != null ? html`<span className=${plp >= 0 ? "up-live" : "dn-live"}>${plp >= 0 ? "+" : ""}${plp.toFixed(2)}%</span>` : "—"}</span>
-              <span className="hbt-live">${x.buy_ts ? html`${x.buy_ts.slice(0, 10)}<i>${x.buy_ts.slice(11)}</i>` : "—"}</span>
+              <span className="hbt-live">${(lastBuy[x.s] || x.buy_ts) ? html`${(lastBuy[x.s] || x.buy_ts).slice(0, 10)}<i>${(lastBuy[x.s] || x.buy_ts).slice(11)}</i>` : "—"}</span>
               <button className="odel-live" title="删除此持仓：该标的全部买卖流水一并清除" onClick=${() => onDelHolding(x.s)}>✕</button>
             </div>`;
           })}
         </div>` : html`<div>
-          ${orders.length ? html`${orders.map(o => html`<div className="orow-live" key=${o.id}>
+          ${orders.length ? html`<button className="dclr-live" title="清空历史回放+实时跟随两视图全部买卖流水：持仓清零、收益归0（不可恢复）" onClick=${onClearOrders}>清空全部订单</button>
+          ${orders.map(o => html`<div className="orow-live" key=${o.id}>
             <b className=${"act-live " + (o.side === "buy" ? "up-live" : "dn-live")}>${o.side === "buy" ? "买入" : "卖出"}</b>
             <span className="onm-live">${o.name}</span>
             <span className="ocode-live">${o.symbol}</span>
@@ -1028,7 +1656,7 @@ function TotalDrawerLive({ holdings, quotes, cards, orders, realizedTotal, onDel
   </div>`;
 }
 
-// 日期选择器（live 实时仓）：与上方 DP 同构的 -live 克隆，行为一致（周六/周日置灰且不可点；
+// 日期选择器（live 实时仓）：与上方 DP 同构的 -live 克隆，行为一致（周六/周日、晚于今天的未来日期置灰且不可点；
 // 点标题逐级上翻选月/选年，‹/›：日视图翻月、月视图翻年、年视图翻12年）
 function DPLive({ value, onPick, title }) {
   const [open, setOpen] = useState(false);
@@ -1041,7 +1669,9 @@ function DPLive({ value, onPick, title }) {
     const [y, m] = vym.split("-").map(Number);
     const t = view === "year" ? new Date(y + delta * 12, m - 1, 1)
       : new Date(y, m - 1 + (view === "month" ? delta * 12 : delta), 1);
-    setVym(`${t.getFullYear()}-${pad2(t.getMonth() + 1)}`);
+    const nv = `${t.getFullYear()}-${pad2(t.getMonth() + 1)}`;
+    if (nv > today.slice(0, 7)) return;  // 未来月份/年份不再后翻：截止日不得晚于今天
+    setVym(nv);
   };
   let panel = null;
   if (open) {
@@ -1051,16 +1681,18 @@ function DPLive({ value, onPick, title }) {
       head = html`<b>${y - 5}年 - ${y + 6}年</b>`;
       body = html`<div className="dp-ym-live">
         ${Array.from({ length: 12 }, (_, i) => { const yy = y - 5 + i;
+          const fut = String(yy) > today.slice(0, 4);  // 未来年份：禁用置灰
           const cls = "dp-d-live" + (String(yy) === value.slice(0, 4) ? " sel-live" : "") + (String(yy) === today.slice(0, 4) ? " td-live" : "");
-          return html`<button key=${yy} className=${cls}
+          return html`<button key=${yy} className=${cls} disabled=${fut}
             onClick=${() => { setVym(`${yy}-${pad2(m)}`); setView("month"); }}>${yy}</button>`; })}
       </div>`;
     } else if (view === "month") {  // 选月：点某月回日历视图
       head = html`<b onClick=${() => setView("year")}>${y}年</b>`;
       body = html`<div className="dp-ym-live">
         ${Array.from({ length: 12 }, (_, i) => { const ym = `${y}-${pad2(i + 1)}`;
+          const fut = ym > today.slice(0, 7);  // 未来月份：禁用置灰
           const cls = "dp-d-live" + (ym === value.slice(0, 7) ? " sel-live" : "") + (ym === today.slice(0, 7) ? " td-live" : "");
-          return html`<button key=${ym} className=${cls}
+          return html`<button key=${ym} className=${cls} disabled=${fut}
             onClick=${() => { setVym(ym); setView("day"); }}>${i + 1}月</button>`; })}
       </div>`;
     } else {  // 日历：周六/周日置灰且不可点
@@ -1074,8 +1706,9 @@ function DPLive({ value, onPick, title }) {
           ${Array.from({ length: days }, (_, i) => {
             const ds = `${y}-${pad2(m)}-${pad2(i + 1)}`;
             const wk = (first + i) % 7 >= 5;  // 周六/周日：禁用置灰
+            const fut = ds > today;            // 未来日期：禁用置灰（截止日最晚到当下）
             const cls = "dp-d-live" + (ds === value ? " sel-live" : "") + (ds === today ? " td-live" : "");
-            return html`<button key=${ds} className=${cls} disabled=${wk}
+            return html`<button key=${ds} className=${cls} disabled=${wk || fut}
               onClick=${() => { onPick(ds); setOpen(false); }}>${i + 1}</button>`;
           })}
         </div>
@@ -1099,7 +1732,7 @@ function DPLive({ value, onPick, title }) {
   </span>`;
 }
 
-function LiveApp({ page, setPage, dstart, setDstart }) {
+function LiveApp({ page, setPage, dstart, setDstart, theme, setTheme }) {
   const [cards, setCards] = useState([]);  // 首屏卡片从后端 SQLite 加载，不再写死在页面里
   const applyCards = ns => { setCards(ns); saveCardsLive(ns); };  // 所有增删改统一：更新界面并回写数据库
   const loadCards = () => getJSON("/api/cards?scope=live").then(d => setCards(d.cards || [])).catch(e => console.error("卡片加载失败", e));
@@ -1128,6 +1761,8 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
   const [orders, setOrders] = useState([]);      // 交易流水，来自 GET /api/orders（含每笔 realized 收益）
   const [realizedTotal, setRealizedTotal] = useState(0);  // 已实现总收益（卖出落袋合计）
   const [showTotal, setShowTotal] = useState(false);  // 全部收益抽屉开关（顶部按钮 → 右侧滑出）
+  const [showBt, setShowBt] = useState(false);  // 回测弹窗开关（与「全部收益」同一排按钮；hist/live 共用同一个浮层）
+  const [account, setAccount] = useState(null);  // 账户本金（GET /api/account?scope=live）：作全部收益%的分母
   const loadHoldings = () => getJSON("/api/holdings?scope=live").then(d => {
     const m = {};
     (d.holdings || []).forEach(h => { m[h.symbol] = { shares: h.shares, cost: h.cost, sellable: h.sellable, name: h.name, buy_ts: h.buy_ts }; });
@@ -1137,7 +1772,8 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
     setOrders(d.orders || []);
     setRealizedTotal(d.realized_total || 0);
   }).catch(e => console.error("订单加载失败", e));
-  useEffect(() => { loadHoldings(); loadOrders(); }, []);  // 首屏拉取；买卖/删除后同样调这两个刷新推导账本
+  const loadAccount = () => getJSON("/api/account?scope=live").then(d => setAccount(d)).catch(e => console.error("账户加载失败", e));
+  useEffect(() => { loadHoldings(); loadOrders(); loadAccount(); }, []);  // 首屏拉取；买卖/删除后同样调这几个刷新推导账本
   const symKey = [...new Set([...cards.map(c => c.symbol), ...Object.keys(holdings)])].join(",");  // 卡片+持仓合集变化时重取批量报价（持仓可能不在卡片里）
   useEffect(() => {
     if (!symKey) return;
@@ -1152,15 +1788,19 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
       .catch(e => console.error("报价刷新失败", e));  // 展开时顺手刷新一次报价
     return ns;
   });
-  const onTrade = () => { loadHoldings(); loadOrders(); };  // 成交后刷新持仓/订单/汇总
+  const onTrade = () => { loadHoldings(); loadOrders(); loadAccount(); };  // 成交后刷新持仓/订单/账户/汇总
   const onDelOrder = id => sendJSON(`/api/orders/${id}?scope=live`, "DELETE")
-    .then(() => { loadOrders(); loadHoldings(); })
+    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
     // 失败（404 记录已不在库里/400 删除被依赖）也要重拉列表：404 时让残留行随刷新消失，避免页面行与库脱节后永远“删不掉”
-    .catch(e => { loadOrders(); loadHoldings(); alert(e.message || e); });
+    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
   // 删除持仓=后端清掉该标的全部买卖流水（连已实现收益一起消失）；不用 confirm：沙箱预览 iframe 会静默拦截模态框返回 false，表现为点击毫无反应
   const onDelHolding = s => sendJSON(`/api/holdings/${s}?scope=live`, "DELETE")
-    .then(() => { loadOrders(); loadHoldings(); })
-    .catch(e => { loadOrders(); loadHoldings(); alert(e.message || e); });
+    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
+    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  // 一键清空全部订单：流水删光后收益归 0（live 抽屉无账户栏，只重拉订单/持仓）；不用 confirm（沙箱预览 iframe 会静默拦截模态框）
+  const onClearOrders = () => sendJSON(`/api/orders?scope=live`, "DELETE")
+    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
+    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
   const addCard = (symbol, name) => {
     if (!cards.some(c => c.symbol === symbol)) {
       const p = gperiod !== "other" ? gperiod : "day";  // 新卡沿用当前统一周期，混合态回落日K
@@ -1209,6 +1849,7 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
       <span className="ptabs-live">
         ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on-live" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
       </span>
+      <${ThemeSwitch} theme=${theme} setTheme=${setTheme} />
       <span className="tabs-live">
         ${GTABS.map(([p, t]) => html`<button key=${p} className=${p === gperiod ? "on-live" : ""} onClick=${() => setAllPeriod(p)}>${t}</button>`)}
       </span>
@@ -1218,7 +1859,7 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
         <${DPLive} value=${dend} onPick=${v => setDend(v)} title="结束日期" />
         ${(dstart || dend !== todayLive()) && html`<button className="clr-live" onClick=${() => { setDstart(""); setDend(todayLive()); }}>清除</button>`}
       </span>
-      <span><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn-live" + (showBt ? " on-live" : "")} title="回测：选一只标的与区间，按日K回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
       <span className="search-live">
         个股：
         <input value=${q} placeholder="请输入名称/代码"
@@ -1231,17 +1872,320 @@ function LiveApp({ page, setPage, dstart, setDstart }) {
         </div>`}
       </span>
     </div>
-    ${showTotal && html`<${TotalDrawerLive} holdings=${holdings} quotes=${quotes} cards=${cards} orders=${orders} realizedTotal=${realizedTotal}
-      onDelOrder=${onDelOrder} onDelHolding=${onDelHolding} onClose=${() => setShowTotal(false)} />`}
+    ${showTotal && html`<${TotalDrawerLive} holdings=${holdings} quotes=${quotes} cards=${cards} orders=${orders} realizedTotal=${realizedTotal} account=${account}
+      onDelOrder=${onDelOrder} onDelHolding=${onDelHolding} onClearOrders=${onClearOrders} onClose=${() => setShowTotal(false)} />`}
+    ${showBt && html`<${Backtest} cards=${cards} defStart=${dstart} defEnd=${dend} onClose=${() => setShowBt(false)} theme=${theme} />`}
     <div className="grid-live">
       ${cards.map((c, i) => html`<${CardLive} key=${c.symbol} symbol=${c.symbol} name=${c.name} period=${c.period} onPeriod=${setCardPeriod}
         index=${i} onDragStart=${setDragIdx} onDropCard=${moveCard} onDelete=${removeCard}
-        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} />`) }
+        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} theme=${theme} />`) }
     </div>
   </div>`;
 }
 
-function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
+// 亮/暗主题开关：主题是全局偏好（不按 hist/live 分叉），两页顶栏共用同一个组件，故不另做 -live 副本
+function ThemeSwitch({ theme, setTheme }) {
+  return html`<span className="thm" title="亮色 / 暗色显示">
+    ${[["light", "亮色"], ["dark", "暗色"]].map(([k, t]) =>
+      html`<button key=${k} className=${theme === k ? "on" : ""} onClick=${() => setTheme(k)}>${t}</button>`)}
+  </span>`;
+}
+
+// ---------- 回测弹窗（hist/live 两视图共用同一个浮层：只吃日K与资金参数，与 scope 无关）----------
+// 交互：选一只标的（下拉搜索 / 点自选卡快捷选）+ 选回测区间 → 取日K算收益曲线。
+// 回测规则全部集中在 btCalc() 里；后续口径（定投/止盈/手续费/仓位等）只改它，弹窗与画图不用动。
+const BT_TERMS = [["近半年", 182], ["近1年", 365], ["近3年", 1095]];  // 快捷区间：按自然日回溯
+
+function btDay(off) {  // 今天/往前 off 天的 YYYY-MM-DD
+  const d = new Date();
+  d.setDate(d.getDate() - (off || 0));
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 回测结果图（口径见 docs/回测规则口径.md）：区间日K + MA3 + 买卖点。
+// 买入点标在当日最低价下方、卖出点标在最高价上方（红买绿卖），鼠标悬停可看该笔价格/数量/本笔盈亏。
+function btKOpt(d) {
+  const P = chartPal();
+  const rows = d.klines || [];
+  const cats = rows.map(r => String(r[0]).slice(0, 10));
+  const k = rows.map(r => [+r[1], +r[2], +r[4], +r[3]]);  // o,c,l,h
+  const ind = d.ind || {};  // 信号判定仍只用 MA3，四条均线仅作图面对照
+  // 图面叠四条均线：MA3/MA5/MA85/MA125（长均线靠后端预热段才在区间首根就有值）
+  const mas = [["MA3", "--ma3"], ["MA5", "--ma5"], ["MA85", "--ma85"], ["MA125", "--ma125"]]
+    .map(([n, v]) => ({ name: n, color: cssVar(v), data: ind[n.toLowerCase()] || [] }));
+  const trades = d.trades || [];
+  let lo = Math.min(...k.map(v => v[2])), hi = Math.max(...k.map(v => v[3]));
+  mas.forEach(m => m.data.forEach(v => {  // 均线也并入 Y 轴范围，防长均线贴边被裁
+    if (v == null) return;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }));
+  if (!(hi > lo)) { lo *= 0.999; hi = hi * 1.001 || 1; }
+  const pad = (hi - lo) * 0.06;  // 标记离K线留点空，免压住影线
+  const pts = side => trades.filter(t => t.side === side).map(t => {
+    const i = cats.indexOf(t.date);
+    const r = rows[i] || [];
+    return { value: [t.date, side === "buy" ? +r[4] - pad : +r[3] + pad], t };  // 挂原始成交，tooltip 取用
+  });
+  const tip = ps => {
+    const dt = ps[0].axisValue;
+    const i = cats.indexOf(dt);
+    const r = rows[i] || [];
+    let s = `${dt}<br/>开 ${r[1]} 收 ${r[2]} 高 ${r[3]} 低 ${r[4]}`;
+    mas.forEach(m => { if (m.data[i] != null) s += `<br/><span style="color:${m.color}">${m.name} ${m.data[i]}</span>`; });
+    trades.filter(t => t.date === dt).forEach(t => {
+      const c = t.side === "buy" ? P.up : P.dn;
+      s += `<br/><b style="color:${c}">${t.side === "buy" ? "买入" : "卖出"}</b> ${t.price} × ${t.qty} = ${t.amount}`;
+      if (t.realized != null) s += ` 本笔盈亏 ${t.realized >= 0 ? "+" : ""}${t.realized}`;
+    });
+    return s;
+  };
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    tooltip: { trigger: "axis", backgroundColor: cssVar("--bg-card"), borderColor: cssVar("--bd-field"),
+      textStyle: { color: cssVar("--tx-1"), fontSize: 12 }, axisPointer: { type: "cross" }, formatter: tip },
+    grid: { left: 54, right: 58, top: 26, bottom: 46 },
+    legend: { show: true, top: 0, left: 64, itemWidth: 14, itemHeight: 8, itemGap: 14,
+      data: ["MA3", "MA5", "MA85", "MA125", "买", "卖"],  // 不列 K 线，省空间
+      textStyle: { color: cssVar("--tx-4"), fontSize: 11 } },
+    xAxis: { type: "category", data: cats, boundaryGap: true, axisLine: { lineStyle: { color: cssVar("--bd-field") } },
+      axisLabel: { color: cssVar("--tx-4"), fontSize: 11, hideOverlap: true } },
+    yAxis: { scale: true, min: lo, max: hi, splitLine: { lineStyle: { color: cssVar("--bg-soft2") } },
+      axisLabel: { color: cssVar("--tx-4"), fontSize: 11 } },
+    dataZoom: [
+      { type: "inside", start: 0, end: 100 },
+      { type: "slider", start: 0, end: 100, bottom: 6, height: 16, borderColor: cssVar("--zoom-border"),
+        backgroundColor: cssVar("--zoom-bg"), fillerColor: cssVar("--zoom-filler"),
+        handleStyle: { color: "#f99502", borderColor: "#f99502" }, moveHandleSize: 0, showDetail: false,
+        textStyle: { color: cssVar("--zoom-tx"), fontSize: 10 } },
+    ],
+    series: [
+      { name: "K", type: "candlestick", data: k,
+        itemStyle: { color: P.up, color0: P.dn, borderColor: P.up, borderColor0: P.dn } },
+      ...mas.map(m => ({ name: m.name, type: "line", data: m.data, showSymbol: false,
+        lineStyle: { width: 1, color: m.color } })),
+      { name: "买", type: "scatter", data: pts("buy"), symbol: "triangle", symbolSize: 11,
+        itemStyle: { color: P.up }, z: 5,
+        label: { show: true, position: "bottom", formatter: "B", color: P.up, fontSize: 10, fontWeight: 700 } },
+      { name: "卖", type: "scatter", data: pts("sell"), symbol: "triangle", symbolRotate: 180, symbolSize: 11,
+        itemStyle: { color: P.dn }, z: 5,
+        label: { show: true, position: "top", formatter: "S", color: P.dn, fontSize: 10, fontWeight: 700 } },
+    ],
+  };
+}
+
+// 净值曲线：资金（现金 + 持仓市值）相对本金的逐日涨跌，与 K 线图共用同一批日期
+function btNavOpt(nav) {
+  const last = nav.length ? nav[nav.length - 1].pct : 0;
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    grid: { left: 12, right: 12, top: 14, bottom: 24, containLabel: true },
+    tooltip: {
+      trigger: "axis", backgroundColor: cssVar("--bg-card"), borderColor: cssVar("--bd-field"),
+      textStyle: { color: cssVar("--tx-1"), fontSize: 12 },
+      formatter: ps => `${ps[0].axisValue}<br/>资金 ${ps[0].data && nav[ps[0].dataIndex] ? nav[ps[0].dataIndex].equity : "-"}（${ps[0].data >= 0 ? "+" : ""}${(+ps[0].data).toFixed(2)}%）`,
+    },
+    xAxis: {
+      type: "category", data: nav.map(x => x.date), boundaryGap: false,
+      axisLine: { lineStyle: { color: cssVar("--bd-field") } },
+      axisLabel: { color: cssVar("--tx-4"), fontSize: 11, hideOverlap: true },
+    },
+    yAxis: {
+      type: "value",
+      axisLabel: { color: cssVar("--tx-4"), fontSize: 11, formatter: v => `${v.toFixed(0)}%` },
+      splitLine: { lineStyle: { color: cssVar("--bg-soft2") } },
+    },
+    series: [{
+      type: "line", name: "资金曲线", data: nav.map(x => +x.pct.toFixed(2)), showSymbol: false,
+      lineStyle: { width: 1.6, color: "#f99502" },
+      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+        { offset: 0, color: "rgba(249,149,2,.32)" }, { offset: 1, color: "rgba(249,149,2,.02)" }]) },
+      markLine: { silent: true, symbol: "none", label: { show: false }, lineStyle: { color: cssVar("--tx-9"), type: "dashed" }, data: [{ yAxis: 0 }] },
+      itemStyle: { color: last >= 0 ? "#f99502" : "#2fcf98" },
+    }],
+  };
+}
+
+// 已停用的旧口径（区间首日一次性买入持有）——保留说明，避免后人误把它当现行规则
+function btCalcHold(rows) {
+  const px = rows.map(r => +r[2]);
+  if (px.length < 2 || !(px[0] > 0)) return null;
+  const base = px[0];
+  let peak = base, mdd = 0;
+  const nav = rows.map((r, i) => {
+    const p = px[i];
+    if (p > peak) peak = p;
+    const dd = p / peak - 1;          // 相对区间内历史峰值的回撤
+    if (dd < mdd) mdd = dd;
+    return { date: r[0], pct: (p / base - 1) * 100 };
+  });
+  const total = nav[nav.length - 1].pct;
+  const days = (new Date(rows[rows.length - 1][0]) - new Date(rows[0][0])) / 86400000;
+  const years = days / 365;
+  return {
+    nav, total, mdd: mdd * 100, n: rows.length,
+    hi: (Math.max(...px) / base - 1) * 100,
+    lo: (Math.min(...px) / base - 1) * 100,
+    first: rows[0][0], last: rows[rows.length - 1][0],
+    // 年化：区间太短（<3个月）时复利外推失真，不出数
+    ann: years >= 0.25 ? (Math.pow(1 + total / 100, 1 / years) - 1) * 100 : null,
+  };
+}
+
+function Backtest({ cards, defStart, defEnd, onClose, theme }) {
+  const [sym, setSym] = useState(null);          // 已选标的 {symbol, name}（只选一只）
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState([]);        // 搜索下拉结果
+  const [s, setS] = useState(defStart || "");   // 回测开始日期
+  const [e, setE] = useState(defEnd || "");     // 回测结束日期
+  const [capital, setCapital] = useState("100000");  // 回测本金
+  const [each, setEach] = useState("10000");          // 单次买入金额
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [res, setRes] = useState(null);          // {sym, data, warn}；data 为 /api/backtest 全量返回
+  const refK = useRef(null);                     // K线图容器（带买卖点）
+  const refNav = useRef(null);                   // 资金曲线容器
+  const seq = useRef(0);
+  useEffect(() => {  // Esc 关闭
+    const onKey = ev => ev.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  useEffect(() => {  // 输入即搜索（300ms 防抖，与顶栏搜索同款）；上游偶发失败保留上次结果
+    const t = setTimeout(async () => {
+      const term = q.trim();
+      if (!term) { setItems([]); return; }
+      const my = ++seq.current;
+      try {
+        const d = await getJSON(`/api/search?q=${encodeURIComponent(term)}`);
+        if (my === seq.current) setItems(d.items || []);
+      } catch (e2) { console.warn("回测标的搜索失败", e2); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+  useEffect(() => {  // 结果就绪后画两张图：区间日K（带买卖点）+ 资金曲线（容器随结果渲染才存在，故依赖 res）
+    if (!res) return;
+    const charts = [];
+    const mk = (el, opt) => {
+      if (!el) return;
+      const ch = echarts.init(el, theme === "dark" ? "dark" : null);  // 亮色用 ECharts 默认主题，暗色用内置 dark（坐标轴/分割线自动跟色）
+      ch.setOption(opt, true);
+      charts.push(ch);
+    };
+    mk(refK.current, btKOpt(res.data));
+    mk(refNav.current, btNavOpt(res.data.nav || []));
+    const onRs = () => charts.forEach(ch => ch.resize());
+    window.addEventListener("resize", onRs);
+    return () => { window.removeEventListener("resize", onRs); charts.forEach(ch => ch.dispose()); };
+  }, [res, theme]);
+  const pick = it => { setSym({ symbol: it.symbol, name: it.name }); setQ(""); setItems([]); };
+  const run = async () => {
+    if (!sym) { setErr("请先选择回测标的"); return; }
+    if (s && e && s > e) { setErr("开始日期不能晚于结束日期"); return; }
+    const cap = parseFloat(capital), ea = parseFloat(each);
+    if (!(cap > 0)) { setErr("本金需大于 0"); return; }
+    if (!(ea > 0)) { setErr("单次买入金额需大于 0"); return; }
+    setBusy(true); setErr("");
+    try {
+      // 规则全部落在后端 /api/backtest（与实盘流水完全隔离），前端只管取回来画图
+      const dr = `${s ? `&start=${s}` : ""}${e ? `&end=${e}` : ""}`;
+      const d = await getJSON(`/api/backtest?symbol=${sym.symbol}&capital=${cap}&each=${ea}${dr}`);
+      const rows = d.klines || [];
+      if (rows.length < 2) throw new Error("区间内交易日不足（落在周末/停牌或超出行情源可回溯范围），请换个区间");
+      setRes({
+        sym, data: d,
+        // 日K源单次约取 800 根（约3年）：请求起点更早时实际起点被截断，明确告知用户
+        warn: s && String(rows[0][0]).slice(0, 10) > s ? `行情源只回溯到 ${String(rows[0][0]).slice(0, 10)}，实际回测起点按该日算` : "",
+      });
+    } catch (e2) { setErr(String(e2.message || e2)); }
+    finally { setBusy(false); }
+  };
+  const sg = v => `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+  const st = res ? res.data.stats : null;   // 指标汇总
+  const trades = res ? res.data.trades || [] : [];
+  return html`<div className="btmask" onClick=${onClose}>
+    <div className="btpanel" onClick=${ev => ev.stopPropagation()}>
+      <div className="bthd">
+        <b>回测</b><i>单票回放：独立账户，不写实盘流水</i>
+        <button className="btclose" title="关闭" onClick=${onClose}>✕</button>
+      </div>
+      <div className="btcfg">
+        <span className="btrow">
+          ${sym && html`<button className="btsym-on" title="点击重新选择标的"
+            onClick=${() => { setSym(null); setQ(""); }}>${sym.name}<em>${sym.symbol}</em></button>`}
+          <input value=${q} placeholder=${sym ? "换一只标的" : "搜索名称/代码"}
+            onChange=${ev => setQ(ev.target.value)}
+            onKeyDown=${ev => ev.key === "Enter" && !ev.nativeEvent.isComposing && items[0] && pick(items[0])} />
+          ${items.length > 0 && html`<div className="drop">
+            ${items.map(it => html`<div key=${it.symbol} onClick=${() => pick(it)}>${it.name} <span style=${{ opacity: .5 }}>${it.symbol}</span></div>`)}
+          </div>`}
+        </span>
+        <span className="btrow">区间：
+          <${DP} value=${s} onPick=${v => setS(v)} title="开始日期" />
+          →
+          <${DP} value=${e} onPick=${v => setE(v)} title="结束日期" />
+          <span className="btquick">
+            ${BT_TERMS.map(([t, n]) => html`<button key=${t} onClick=${() => { setS(btDay(n)); setE(btDay(0)); }}>${t}</button>`)}
+          </span>
+        </span>
+        <span className="btrow">本金：
+          <input value=${capital} onChange=${ev => setCapital(ev.target.value)} style=${{ width: 90 }} />
+        </span>
+        <span className="btrow">每次买入：
+          <input value=${each} onChange=${ev => setEach(ev.target.value)} style=${{ width: 90 }} />
+        </span>
+        <button className="btgo" disabled=${busy} onClick=${run}>${busy ? "回测中…" : "开始回测"}</button>
+      </div>
+      <div className="btbody">
+        ${cards.length > 0 && html`<div className="btcards">
+          ${cards.map(c => html`<button key=${c.symbol} className=${sym && sym.symbol === c.symbol ? "on" : ""}
+            title=${c.symbol} onClick=${() => pick(c)}>${c.name}</button>`)}
+        </div>`}
+        ${err && html`<div className="bterr">${err}</div>`}
+        ${!res && !err && html`<div className="btph">选好标的与区间后点「开始回测」</div>`}
+        ${res && html`<div>
+          ${res.warn && html`<div className="btwarn">${res.warn}</div>`}
+          <div className="btstat">
+            <span>${res.sym.name} <span style=${{ opacity: .5, fontSize: 12 }}>${res.sym.symbol}</span></span>
+            <span>累计收益<b className=${st.total >= 0 ? "up" : "dn"}>${sg(st.total)}%</b></span>
+            <span>期末资金<b className=${st.total >= 0 ? "up" : "dn"}>${st.end.toFixed(2)}</b></span>
+            ${st.ann != null && html`<span>年化<b className=${st.ann >= 0 ? "up" : "dn"}>${sg(st.ann)}%</b></span>`}
+            <span>最大回撤<b className="dn">${st.mdd.toFixed(2)}%</b></span>
+            <span>买入<b>${st.buys}</b>次</span>
+            <span>卖出<b>${st.sells}</b>次</span>
+            ${st.winrate != null && html`<span>胜率<b>${st.winrate}%</b></span>`}
+            <span>已实现<b className=${st.realized >= 0 ? "up" : "dn"}>${sg(st.realized)}</b></span>
+            ${st.open_qty > 0 && html`<span>未平仓<b>${st.open_qty}</b></span>`}
+            <span>区间<b>${st.first} ~ ${st.last}</b></span>
+          </div>
+          <div className="btkchart" ref=${refK}></div>
+          <div className="btdeal">成交明细（${trades.length} 笔；K线上 B=买入、S=卖出）</div>
+          ${trades.length === 0 && html`<div className="btph">区间内未触发任何买卖信号</div>`}
+          ${trades.length > 0 && html`<div className="bttbl">
+            <div className="bttr bthd2"><span>日期</span><span>方向</span><span>价格</span><span>数量</span><span>金额</span><span>本笔盈亏</span><span>触发</span></div>
+            ${trades.map((t, i) => html`<div className="bttr" key=${i}>
+              <span>${t.date}</span>
+              <span className=${t.side === "buy" ? "up" : "dn"}>${t.side === "buy" ? "买入" : "卖出"}</span>
+              <span>${t.price}</span>
+              <span>${t.qty}</span>
+              <span>${t.amount}</span>
+              <span className=${t.realized == null ? "" : (t.realized >= 0 ? "up" : "dn")}>${t.realized == null ? "—" : sg(t.realized)}</span>
+              <span className="btrs">${t.side === "buy" ? "MA3 在实体下方" : (t.reason === "broke" ? "跌破前日箱体" : "实体一半落进 MA3")}</span>
+            </div>`)}
+          </div>`}
+          <div className="btnavhd">资金曲线（现金 + 持仓市值）</div>
+          <div className="btnavchart" ref=${refNav}></div>
+          <div className="btrule">口径：箱体=当日开→收实体；3 日线低于实体底部才买（每次 ${each || "10000"} 元）；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。</div>
+        </div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, theme, setTheme }) {
   const [cards, setCards] = useState([]);  // 首屏卡片从后端 SQLite 加载，不再写死在页面里
   const applyCards = ns => { setCards(ns); saveCards(ns); };  // 所有增删改统一：更新界面并回写数据库
   const loadCards = () => getJSON("/api/cards" + (dend ? `?as_of=${encodeURIComponent(dend + " 23:59")}` : ""))
@@ -1270,6 +2214,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
   const [orders, setOrders] = useState([]);      // 交易流水，来自 GET /api/orders（含每笔 realized 收益；选了结束日期只含视点前的单）
   const [realizedTotal, setRealizedTotal] = useState(0);  // 已实现总收益（卖出落袋合计，同样随视点截断）
   const [showTotal, setShowTotal] = useState(false);  // 全部收益抽屉开关（顶部按钮 → 右侧滑出）
+  const [showBt, setShowBt] = useState(false);  // 回测弹窗开关（与「全部收益」同一排按钮；hist/live 共用同一个浮层）
   const hseq = useRef(0), oseq = useRef(0), aseq = useRef(0);  // 各接口视点请求序号：切日期后迟到的旧视点响应一律丢弃，防旧数据覆盖新视点显示
   const loadHoldings = () => {
     // 历史回放：选了结束日期就按该视点重放持仓（之后下的单不出现，如27号买的仓在26号视点里不存在）；
@@ -1346,6 +2291,10 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
   const onDelHolding = s => sendJSON(`/api/holdings/${s}`, "DELETE")
     .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
     .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  // 一键清空全部订单：流水删光后持仓清零、收益归 0、总资产/可用资金回到本金；不用 confirm（沙箱预览 iframe 会静默拦截模态框）
+  const onClearOrders = () => sendJSON(`/api/orders`, "DELETE")
+    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
+    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
   const addCard = (symbol, name) => {
     if (!cards.some(c => c.symbol === symbol)) {
       const p = gperiod !== "other" ? gperiod : "day";  // 新卡沿用当前统一周期，混合态回落日K
@@ -1358,7 +2307,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
   const removeCard = async symbol => {
     try {
       await sendJSON(`/api/cards/${encodeURIComponent(symbol)}`, "DELETE");
-      setCards(cards.filter(c => c.symbol !== symbol));
+      setCards(prev => prev.filter(c => c.symbol !== symbol));
     } catch (e) { console.error("卡片删除失败", e); }
   };
   const [dragIdx, setDragIdx] = useState(null);
@@ -1394,6 +2343,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
       <span className="ptabs">
         ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
       </span>
+      <${ThemeSwitch} theme=${theme} setTheme=${setTheme} />
       <span className="tabs">
         ${GTABS.map(([p, t]) => html`<button key=${p} className=${p === gperiod ? "on" : ""} onClick=${() => setAllPeriod(p)}>${t}</button>`)}
       </span>
@@ -1403,7 +2353,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
         <${DP} value=${dend} onPick=${v => setEnd(v)} title="结束日期" />
         ${(dstart || dend) && html`<button className="clr" onClick=${() => setDates("", "")}>清除</button>`}
       </span>
-      <span><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn" + (showBt ? " on" : "")} title="回测：选一只标的与区间，按日K回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
       <span className="search">
         个股：
         <input value=${q} placeholder="请输入名称/代码"
@@ -1417,11 +2367,12 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates }) {
       </span>
     </div>
     ${showTotal && html`<${TotalDrawer} holdings=${holdings} quotes=${quotes} dayPx=${dayPxMap} dend=${dend} cards=${cards} orders=${orders} realizedTotal=${realizedTotal} account=${account}
-      onDelOrder=${onDelOrder} onDelHolding=${onDelHolding} onClose=${() => setShowTotal(false)} />`}
+      onDelOrder=${onDelOrder} onDelHolding=${onDelHolding} onClearOrders=${onClearOrders} onClose=${() => setShowTotal(false)} />`}
+    ${showBt && html`<${Backtest} cards=${cards} defStart=${dstart} defEnd=${dend} onClose=${() => setShowBt(false)} theme=${theme} />`}
     <div className="grid">
       ${cards.map((c, i) => html`<${Card} key=${c.symbol} symbol=${c.symbol} name=${c.name} period=${c.period} onPeriod=${setCardPeriod}
         index=${i} onDragStart=${setDragIdx} onDropCard=${moveCard} onDelete=${removeCard}
-        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} />`) }
+        dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} theme=${theme} />`) }
     </div>
   </div>`;
 }
@@ -1434,20 +2385,38 @@ function App() {
   const [page, setPageState] = useState("hist");
   const [hd, setHd] = useState({ s: "", e: "" });  // 历史仓开始/结束日期
   const [ls, setLs] = useState("");                // 实时仓开始日期（结束日期恒为今天不持久化，留在 LiveApp 内）
+  // 主题：默认深色；初值先读 localStorage（仅用于亮色用户首帧不闪深色），真实值随后由 prefs 覆盖
+  const [theme, setThemeState] = useState(() => {
+    let v = "dark";
+    try { v = localStorage.getItem("kp_theme") === "light" ? "light" : "dark"; } catch (e) {}
+    document.documentElement.classList.toggle("light", v === "light");  // 首帧前先挂上类，避免闪一下
+    return v;
+  });
   const [booted, setBooted] = useState(false);     // 偏好未就绪前不渲染页面：避免先按空日期取一轮K线再返工
+  useEffect(() => { try { localStorage.setItem("kp_theme", theme); } catch (e) {} }, [theme]);
   useEffect(() => {
     getJSON("/api/prefs").then(d => {
       const p = d.prefs || {};
       // 一次性迁移：后端从未存过的键，若本浏览器 localStorage 还留着旧版存的值，先补种给后端再应用
-      const legacy = { page: "kp_page", hist_dstart: "kp_dstart", hist_dend: "kp_dend", live_dstart: "kp_dstart_live" };
+      const legacy = { page: "kp_page", hist_dstart: "kp_dstart", hist_dend: "kp_dend", live_dstart: "kp_dstart_live", theme: "kp_theme" };
       const seed = {};
       for (const k in legacy) {
         if (!(k in p)) { try { const v = localStorage.getItem(legacy[k]); if (v != null) seed[k] = v; } catch (e) {} }
       }
       const apply = q => {
         setPageState(q.page === "live" ? "live" : "hist");
-        setHd({ s: q.hist_dstart || "", e: q.hist_dend || "" });
+        // 旧版本可选到未来日期：库里存的截止日若晚于今天，进页面就夹回今天并写回，避免图表停在未来
+        const p2 = n => String(n).padStart(2, "0"), t0 = new Date();
+        const tdy = `${t0.getFullYear()}-${p2(t0.getMonth() + 1)}-${p2(t0.getDate())}`;
+        const e0 = q.hist_dend && q.hist_dend > tdy ? tdy : (q.hist_dend || "");
+        if (e0 !== (q.hist_dend || "")) put({ hist_dend: e0 });
+        setHd({ s: q.hist_dstart || "", e: e0 });
         setLs(q.live_dstart || "");
+        // 主题：先把类名挂到 <html> 再 setState——子组件的建图 effect 会在父组件 effect 之前跑，
+        // 类名晚一步就会让卡片图读到旧主题的变量值（亮色点了变不回、或反之）
+        const t = q.theme === "light" ? "light" : "dark";
+        document.documentElement.classList.toggle("light", t === "light");
+        setThemeState(t);
         setBooted(true);
       };
       if (Object.keys(seed).length)
@@ -1457,6 +2426,12 @@ function App() {
   }, []);
   const put = prefs => sendJSON("/api/prefs", "PUT", { prefs }).catch(e => console.warn("偏好保存失败", e));
   const setPage = k => { setPageState(k); put({ page: k }); };
+  // 切主题：先同步改 <html> 类名（同上，必须早于子组件重绘），再记库
+  const setTheme = t => {
+    document.documentElement.classList.toggle("light", t === "light");
+    setThemeState(t);
+    put({ theme: t });
+  };
   // 差量写库：改哪个键只 PUT 哪个键——全量写两个键会被其他标签页的旧内存值反向覆盖
   //（旧页选一次结束日期会把其内存里的旧起始日期写回库，盖掉新选的值）
   const setStart = s => { setHd(h => ({ ...h, s })); put({ hist_dstart: s }); };
@@ -1465,8 +2440,8 @@ function App() {
   const setLiveStart = v => { setLs(v); put({ live_dstart: v }); };
   if (!booted) return html`<div></div>`;
   return page === "hist"
-    ? html`<${HistApp} page=${page} setPage=${setPage} dstart=${hd.s} dend=${hd.e} setStart=${setStart} setEnd=${setEnd} setDates=${setDates} />`
-    : html`<${LiveApp} page=${page} setPage=${setPage} dstart=${ls} setDstart=${setLiveStart} />`;
+    ? html`<${HistApp} page=${page} setPage=${setPage} dstart=${hd.s} dend=${hd.e} setStart=${setStart} setEnd=${setEnd} setDates=${setDates} theme=${theme} setTheme=${setTheme} />`
+    : html`<${LiveApp} page=${page} setPage=${setPage} dstart=${ls} setDstart=${setLiveStart} theme=${theme} setTheme=${setTheme} />`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

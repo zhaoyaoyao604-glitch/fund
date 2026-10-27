@@ -10,8 +10,9 @@ server/cards.db*
 # 开发过程临时探针脚本
 _probe/
 
-# 调试截图
+# 调试截图与本地备份
 *.png
+*.bak
 
 # 本地开发工具（便携 Git 等）
 .tools/

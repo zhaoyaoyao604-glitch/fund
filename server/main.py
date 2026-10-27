@@ -1,13 +1,15 @@
 # 基金看盘后端：FastAPI -> 免费行情源（无 key）
-# A股/港股/ETF：腾讯（日/周/月K、分钟K 走裸域 ifzq.gtimg.cn；分时走 web.ifzq.gtimg.cn）
+# A股/港股/ETF：腾讯 ifzq（日/周/月K、分钟K、分时），web. 子域与裸域互为备份，WAF 风控时自动切换
 # 美股：日/周/月K 走新浪全历史（不复权）+ 腾讯实时报价补当日活动K线；分时走东财 trends2（上游限流时返回提示）
-# 注：web. 子域 fqkline 曾被腾讯WAF挑战（501 JS验证页），故日/周/月K统一走裸域
+# 注：腾讯 WAF 会不定时挑战 ifzq 的某个子域（返回 501 JS验证页），故请求层做双域回退
+import asyncio
 import datetime
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -16,9 +18,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-# web.ifzq 子域会被腾讯WAF风控（501跳转页），裸域全通：fqkline/minute/mkline 一律走裸域
-WEB = "https://ifzq.gtimg.cn/appstock/app"  # minute（分时）
-BARE = "https://ifzq.gtimg.cn/appstock/app"  # fqkline（日/周/月K） / mkline（分钟K）
+# ifzq 双域：web. 与裸域内容一致，谁被 WAF 挑战就切另一个（pref 记住当前可用域）
+IFZQ_HOSTS = ("web.ifzq.gtimg.cn", "ifzq.gtimg.cn")
+_ifzq_pref = {"i": 0}
+WEB = "https://web.ifzq.gtimg.cn/appstock/app"  # minute（分时）
+BARE = "https://web.ifzq.gtimg.cn/appstock/app"  # fqkline（日/周/月K） / mkline（分钟K）
 EM_SUGGEST = "https://searchapi.eastmoney.com/api/suggest/get"  # 东财搜索
 EM_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # 东财网页端公开 token
 QT = "https://qt.gtimg.cn/q="  # 腾讯实时报价（GBK文本），美股补当日活动K线用
@@ -116,6 +120,12 @@ def _init_db():
             con.execute("CREATE TABLE account (scope TEXT PRIMARY KEY, capital REAL NOT NULL)")
             con.executemany("INSERT INTO account (scope, capital) VALUES (?, ?)",
                             [("hist", 1000000.0), ("live", 1000000.0)])
+    # 画线表：趋势线/水平线按「标的+周期」存，pts 是 JSON 数组 [{x: 类目时间, y: 价格}]；两页共用同一份线
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='drawings'").fetchone():
+        with con:
+            con.execute("CREATE TABLE drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+                        "period TEXT NOT NULL DEFAULT 'day', kind TEXT NOT NULL CHECK(kind IN ('trend','h')), "
+                        "pts TEXT NOT NULL, created TEXT NOT NULL)")
     con.close()
 
 
@@ -152,18 +162,27 @@ def _norm_asof(as_of):
     return a or None
 
 
-def _replay(con, exclude_id=None, scope="hist", as_of=None):
+def _replay(con, exclude_id=None, scope="hist", as_of=None, splits=None, defer_today_sell=False):
     """按 (ts, id) 全量重演流水。返回 (pos, realized, conflict)：
-    pos = symbol -> {shares, cost(移动加权均价), bought_today(当日买入的A股份额), buy_ts(建仓首笔买入时间), name}；
+    pos = symbol -> {shares, cost(移动加权均价), bought_today(当日买入的A股份额), sold_today(当日卖出份额),
+    buy_ts(建仓首笔买入时间), name}；
     realized = 卖出单id -> 该笔已实现收益 (卖出价-当时均价)*数量；
     conflict = 重演中第一笔卖超的记录（正常数据恒为 None，仅删除预检时出现）。
+    as_of 为空时按「现在」截断（晚于现在的流水视为尚未生效，不参与重演）；
     as_of（"YYYY-MM-DD HH:MM"）非空时只重演该时点前的流水——历史回放视点：
-    回看某日时之后下的单不出现；T+1 的「当日买入」同样按 as_of 的日期判定，回放出的可卖数与当时一致"""
+    回看某日时之后下的单不出现；T+1 的「当日买入」同样按 as_of 的日期判定，回放出的可卖数与当时一致。
+    defer_today_sell（显示口径）：视点日（as_of 当天/实时仓的今天）的卖出「次日生效」——不扣份额、
+    不计已实现收益，收益下个截止日才体现（基金赎回 T+1 到账式）；仅展示端（holdings/orders/account）开启，
+    卖出校验与可卖数不受影响（当日卖出仍占用可卖，不能重复卖），清仓沉底照旧次日触发
+    splits（symbol -> [(生效日"YYYY-MM-DD", 数量倍数)]，按生效日升序）：合股/分股事件——重演跨过
+    生效日时把该标的持仓换到新股本基准（合股 m<1：shares×m、成本×1/m、市值不变），生效日晚于
+    视点的不应用（回放合股前的视点仍是旧股本口径）；流水单的价/量按各自业务时点的基准执行，
+    事件只做两段基准间的桥接，总市值跨事件自然连续。缺省 None 不做换算（A股/港股恒空）"""
     sql = f"SELECT id, symbol, name, side, price, qty, ts FROM {_tbl(scope, 'orders')}"
-    conds, args = [], []
-    if as_of:
-        conds.append("ts <= ?")
-        args.append(as_of)
+    # 截断口径：有视点按视点截断，无视点按「现在」——预填的未来单不能提前占用份额，
+    # 否则它之后的正常卖出会被判成「当时超卖」而遭拒
+    cut = as_of or datetime.datetime.now().strftime(TS_FMT)
+    conds, args = ["ts <= ?"], [cut]
     if exclude_id is not None:
         conds.append("id != ?")
         args.append(exclude_id)
@@ -172,11 +191,29 @@ def _replay(con, exclude_id=None, scope="hist", as_of=None):
     rows = con.execute(sql + " ORDER BY ts, id", tuple(args)).fetchall()
     today = (as_of or datetime.datetime.now().strftime(TS_FMT))[:10]
     pos, realized, conflict = {}, {}, None
+    evcur = {}  # symbol -> 已消费到第几个事件（事件与流水都按时间升序，游标单调推进）
+
+    def _drain(sym, day, p):
+        # 把生效日不晚于 day 的事件应用到持仓 p（清仓态数值全 0，换算无副作用）
+        evs = (splits or {}).get(sym)
+        if not evs:
+            return
+        i = evcur.get(sym, 0)
+        while i < len(evs) and evs[i][0] <= day:
+            m = evs[i][1]
+            p["shares"] *= m
+            p["cost"] /= m
+            p["bought_today"] *= m
+            p["sold_today"] *= m
+            i += 1
+        evcur[sym] = i
+
     for r in rows:
-        p = pos.setdefault(r["symbol"], {"shares": 0.0, "cost": 0.0, "bought_today": 0.0, "buy_ts": None, "name": r["name"]})
+        p = pos.setdefault(r["symbol"], {"shares": 0.0, "cost": 0.0, "bought_today": 0.0, "sold_today": 0.0, "buy_ts": None, "name": r["name"]})
         p["name"] = r["name"]
+        _drain(r["symbol"], r["ts"][:10], p)  # 该笔业务日之前生效的合股/分股先换基准（截断流水 ts≤as_of，日期天然不超前）
         if r["side"] == "buy":
-            if p["shares"] <= 1e-9:  # 建仓（含清仓后重建）记该笔时间；加仓保持首笔买入时间
+            if p["shares"] <= 1e-9:  # 建仓（含清仓后重建）记该笔时间；加仓保持首笔买入时间（「最后一次买入」仅在前端展示层从 orders 派生，不改本口径）
                 p["buy_ts"] = r["ts"]
             total = p["cost"] * p["shares"] + r["price"] * r["qty"]
             p["shares"] += r["qty"]
@@ -184,6 +221,9 @@ def _replay(con, exclude_id=None, scope="hist", as_of=None):
             if not _is_t0(r["symbol"]) and r["ts"][:10] == today:
                 p["bought_today"] += r["qty"]  # A股当日买入份额锁定到明日（T+1）
         else:
+            if defer_today_sell and r["ts"][:10] == today:
+                p["sold_today"] += r["qty"]  # 视点日的卖出次日才生效：份额与已实现收益都不动，仅记当日已卖（可卖仍要扣）
+                continue
             avail = p["shares"] if _is_t0(r["symbol"]) else p["shares"] - p["bought_today"]
             if r["qty"] > avail + 1e-9:
                 conflict = dict(r)
@@ -191,42 +231,55 @@ def _replay(con, exclude_id=None, scope="hist", as_of=None):
             realized[r["id"]] = (r["price"] - p["cost"]) * r["qty"]
             p["shares"] -= r["qty"]
             if p["shares"] <= 1e-9:  # 清仓：均价、当日买入与买入时间一并归零
-                p["shares"] = p["cost"] = p["bought_today"] = 0.0
+                p["shares"] = p["cost"] = p["bought_today"] = p["sold_today"] = 0.0
                 p["buy_ts"] = None
+    for sym, p in pos.items():
+        _drain(sym, today, p)  # 尾部事件：买入后到视点日之间无流水也要换算（7-10买入、7-15合股、视点7-16）
     return pos, realized, conflict
 
 
 def _promote_bought_cards(con, scope, as_of=None):
-    """买入后卡片前置，两视图口径分叉：
+    """买入后卡片前置、清仓沉底，两视图口径分叉：
     hist（历史模拟仓）视点驱动：模拟仓的买卖业务时间就是筛选截止日，与真实时钟无关——「买入后的第二天」
     按回放轴判定（视点日晚于最后买入日）。每次取卡把仍持仓(_replay as_of 截断)且 last_buy 日期 < 视点日的
     卡整体提到最前，按 last_buy DESC, first_buy ASC, last_id ASC（与抽屉建仓序一致，抽屉第一的持仓卡即首页第一张）；
-    视点未过买入日的不前置（当天买的不动），清仓的不置顶。promo 表 hist 行改存「上次重排的视点串」做视点内幂等：
-    同一视点重复取卡不重排，用户手动拖拽的顺序不被覆盖；切换视点（推进/回拨日期）才重算。hist 无视点不触发。
+    视点未过买入日的不前置（当天买的不动）。清仓沉底与前置对称：有流水、视点重演已无持仓、且视点前最后一笔
+    流水早于视点日（即前一(及更早)日卖掉清仓，当天卖的不动）的卡挪到列表末尾。promo 表 hist 行存
+    「v2|上次重排的视点串」做视点内幂等：同一视点重复取卡不重排，用户手动拖拽的顺序不被覆盖；切换视点
+    （推进/回拨日期）才重算；旧格式游标（无 v2| 前缀）视为未跑过，升级后该视点首次取卡即按新口径重排一次。
+    hist 无视点不触发。
     live（实时跟随仓）真实时钟驱动：每天首次取卡把「游标日(含)到昨天」created_at（真实下单时刻，锚业务 ts 会永不
-    命中）有买入且仍持仓的卡提到最前，游标 promo.last_date 记真实日期，每日幂等一次；昨天没开页面下次打开补前置。"""
+    命中）有买入且仍持仓的卡提到最前；昨天及更早清仓（当前无持仓、最后一笔真实下单早于今天，今天清仓的明天沉）
+    的卡沉底。游标 promo.last_date 记真实日期，每日幂等一次；昨天没开页面下次打开补前置/补沉底。"""
     if scope == "hist":
         if not as_of:
             return  # 历史仓买卖时间锚筛选截止日，没视点就没有「第二天」，不动 pos
         row = con.execute("SELECT last_date FROM promo WHERE scope='hist'").fetchone()
-        if row and row["last_date"] == as_of:
-            return  # 该视点已重排过，幂等跳过
+        cur = row["last_date"][3:] if row and row["last_date"].startswith("v2|") else ""  # 旧游标按未跑过算
+        if cur and cur == as_of:
+            return  # 该视点已按新口径重排过，幂等跳过
+        held = {s for s, p in _replay(con, scope=scope, as_of=as_of)[0].items() if p["shares"] > 1e-9}
         rows = con.execute(f"SELECT symbol, MAX(ts) AS last_buy, MIN(ts) AS first_buy, MAX(id) AS last_id "
                            f"FROM {_tbl(scope, 'orders')} WHERE side='buy' GROUP BY symbol "
                            f"HAVING substr(MAX(ts),1,10) < ? "
                            f"ORDER BY last_buy DESC, first_buy ASC, last_id ASC", (as_of[:10],)).fetchall()
-        if rows:
-            held = {s for s, p in _replay(con, scope=scope, as_of=as_of)[0].items() if p["shares"] > 1e-9}
-            hit = [r["symbol"] for r in rows if r["symbol"] in held]
-            if hit:
-                cards = [r["symbol"] for r in
-                         con.execute(f"SELECT symbol FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()]
-                hs, cs = set(hit), set(cards)
-                ordered = [s for s in hit if s in cs] + [c for c in cards if c not in hs]
-                with con:
-                    con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
+        hit = [r["symbol"] for r in rows if r["symbol"] in held]  # 继续持有的才前置
+        # 清仓沉底：视点前最后一笔流水早于视点日（当天卖的不动）且视点重演无持仓
+        closed = {r["symbol"] for r in con.execute(
+            f"SELECT symbol FROM {_tbl(scope, 'orders')} WHERE ts <= ? GROUP BY symbol HAVING MAX(ts) < ?",
+            (as_of, as_of[:10])).fetchall() if r["symbol"] not in held}
+        if hit or closed:
+            cards = [r["symbol"] for r in
+                     con.execute(f"SELECT symbol FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()]
+            hs, ds, cs = set(hit), closed, set(cards)
+            # 前置持仓 → 未涉及的卡居中（各自保持原相对顺序）→ 清仓沉底
+            ordered = ([s for s in hit if s in cs]
+                       + [c for c in cards if c not in hs and c not in ds]
+                       + [c for c in cards if c in ds])
+            with con:
+                con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
         with con:
-            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES ('hist', ?)", (as_of,))
+            con.execute("INSERT OR REPLACE INTO promo (scope, last_date) VALUES ('hist', ?)", ("v2|" + as_of,))
         return
     # ---- live：真实时钟游标 ----
     today = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -244,15 +297,20 @@ def _promote_bought_cards(con, scope, as_of=None):
                        f"WHERE side='buy' AND created_at >= ? AND created_at < ? GROUP BY symbol "
                        f"ORDER BY last_buy DESC, first_buy ASC, last_id ASC",
                        (last, today)).fetchall()
-    hit = []
-    if rows:
-        held = {s for s, p in _replay(con, scope=scope)[0].items() if p["shares"] > 1e-9}  # 仍持仓才前置
-        hit = [r["symbol"] for r in rows if r["symbol"] in held]
-    if hit:
+    held = {s for s, p in _replay(con, scope=scope)[0].items() if p["shares"] > 1e-9}
+    hit = [r["symbol"] for r in rows if r["symbol"] in held]  # 仍持仓才前置
+    # 清仓沉底：最后一笔真实下单早于今天且当前无持仓（今天清仓的明天沉）
+    closed = {r["symbol"] for r in con.execute(
+        f"SELECT symbol FROM {_tbl(scope, 'orders')} WHERE created_at != '' "
+        f"GROUP BY symbol HAVING MAX(created_at) < ?", (today,)).fetchall() if r["symbol"] not in held}
+    if hit or closed:
         cards = [r["symbol"] for r in
                  con.execute(f"SELECT symbol FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()]
-        hs, cs = set(hit), set(cards)
-        ordered = [s for s in hit if s in cs] + [c for c in cards if c not in hs]  # 不在自选卡的买入流水自然跳过
+        hs, ds, cs = set(hit), closed, set(cards)
+        # 前置持仓 → 未涉及的卡居中 → 清仓沉底（不在自选卡的买入流水自然跳过）
+        ordered = ([s for s in hit if s in cs]
+                   + [c for c in cards if c not in hs and c not in ds]
+                   + [c for c in cards if c in ds])
         with con:
             con.executemany(f"UPDATE {_tbl(scope, 'cards')} SET pos=? WHERE symbol=?", list(enumerate(ordered)))
     with con:
@@ -269,17 +327,36 @@ _CACHE = {}
 TTL = 30  # 秒：同 URL 30 秒内走内存。防止刷新页面 37 卡并发连击上游触发腾讯 WAF 风控
 
 
+def _swap_host(url, host):
+    p = urlsplit(url)
+    return urlunsplit((p.scheme, host, p.path, p.query, p.fragment))
+
+
 async def get_json(url, referer=None, timeout=15):
     now = time.time()
     hit = _CACHE.get(url)
     if hit and now - hit[0] < TTL:
         return hit[1]
     headers = UA if not referer else {**UA, "Referer": referer}
+    if "ifzq.gtimg.cn" in url:  # 双域回退：优先当前已知可用域，被 WAF 挑战就换另一个
+        i = _ifzq_pref["i"]
+        hosts = (IFZQ_HOSTS[i], IFZQ_HOSTS[1 - i])
+    else:
+        hosts = (None,)
+    data = None
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as cli:
-        r = await cli.get(url)
-    try:
-        data = json.loads(r.content.decode("utf-8"))  # 上游是 UTF-8，但 header 不标，得强解
-    except json.JSONDecodeError:
+        for host in hosts:
+            u = _swap_host(url, host) if host else url
+            try:
+                r = await cli.get(u)
+                data = json.loads(r.content.decode("utf-8"))  # 上游是 UTF-8，但 header 不标，得强解
+            except Exception:  # 连不上 / 501 挑战页 / 非 JSON 都算该域不可用
+                data = None
+                continue
+            if host:
+                _ifzq_pref["i"] = IFZQ_HOSTS.index(host)
+            break
+    if data is None:
         raise HTTPException(502, "上游行情源返回异常（疑似腾讯WAF临时限流），请稍等片刻再刷新")
     if len(_CACHE) > 300:
         _CACHE.clear()
@@ -341,6 +418,75 @@ async def us_live_bar(symbol):
     return [f[30][:10], op, price, hi, lo, f[6]]  # [日期,开,现价,高,低,量]
 
 
+# ---------- 合股/分股事件检测（美股）：新浪日K是不复权全历史，合股日价格跳整数倍、数量反向变 ----------
+# 杠杆ETF（如 SOXS）跌到个位数就反向拆分：股价×10、股数÷10、总市值不变。事件 = (生效日, 数量倍数)
+_SPLIT_CACHE = {}  # usXXX -> (ts, [(生效日, 数量倍数)])：事件不常变，缓存 10 分钟
+_SPLIT_RATIOS = (20.0, 10.0, 5.0, 4.0, 3.0, 2.0, 0.5, 0.25, 0.2, 0.1, 0.05)
+
+
+def _guess_split_ratio(jump):
+    # 跳变比值 = 比例 × (1 + 当日真实涨跌)。合股/分股比例必为整数或简单倒数，真实涨跌容差
+    # -15%~+20%；多候选时取对数距离最近者（如 4.75 可能是 1:5 也可能是 1:4）
+    best = None
+    for r in _SPLIT_RATIOS:
+        x = jump / r
+        if 0.85 <= x <= 1.20:
+            dist = abs(math.log(x))
+            if best is None or dist < best[0]:
+                best = (dist, r)
+    return best[1] if best else None
+
+
+async def us_split_events(symbol):
+    # 从不复权日K找合股/分股生效日：价格整数倍跳变 + 成交量基准同比例反向位移双重验证。
+    # 量能是关键判据——真实单日暴涨暴跌（3倍杠杆ETF可±50%）当日放量、后5日均量回落原基准；
+    # 合股后股本变小，量基准永久缩到 1/比例，两者不会混淆
+    now = time.time()
+    hit = _SPLIT_CACHE.get(symbol)
+    if hit and now - hit[0] < 600:
+        return hit[1]
+    rows = await us_daily_rows(symbol)
+    events = []
+    for i in range(1, len(rows)):
+        prev_c, cur_c = float(rows[i - 1][2]), float(rows[i][2])
+        if prev_c <= 0:
+            continue
+        jump = cur_c / prev_c
+        if not (jump > 1.8 or jump < 0.55):
+            continue
+        r = _guess_split_ratio(jump)
+        if not r:
+            continue
+        v0 = float(rows[i - 1][5])
+        vday = float(rows[i][5]) / v0 if v0 > 0 else 1.0
+        vpre = [float(x[5]) for x in rows[max(0, i - 5):i]]
+        vpost = [float(x[5]) for x in rows[i + 1:i + 6]]
+        vpost_r = (sum(vpost) / len(vpost)) / (sum(vpre) / len(vpre)) \
+            if vpre and vpost and sum(vpre) > 0 else None
+        if r >= 2:   # 合股：当日量缩且量基准下移（后5日不足时退化用当日量比，新合股当天即可判）
+            ok = vday < 0.6 and (vpost_r is None or vpost_r < 0.7)
+        else:        # 分股：量基准永久上移（单日放量脉冲不算，须后5日持续确认）
+            ok = vpost_r is not None and vpost_r > 1.4
+        if ok:
+            events.append((rows[i][0], 1.0 / r))
+    if len(_SPLIT_CACHE) > 100:
+        _SPLIT_CACHE.clear()
+    _SPLIT_CACHE[symbol] = (now, events)
+    return events
+
+
+async def _splits_for(con, scope):
+    # 流水表里出现过的美股标的逐个取合股/分股事件（缓存复用；A股K线源本身已前复权、港股暂未
+    # 接入事件检测，天然空表）。上游失败降级为空：按无事件重演，不阻断持仓/订单主链路
+    syms = [r["symbol"] for r in con.execute(
+        f"SELECT DISTINCT symbol FROM {_tbl(scope, 'orders')} WHERE symbol LIKE 'us%'").fetchall()]
+    if not syms:
+        return {}
+    results = await asyncio.gather(*(us_split_events(s) for s in syms), return_exceptions=True)
+    return {s: evs for s, evs in zip(syms, results)
+            if isinstance(evs, list) and evs}
+
+
 def resample(rows, period):
     # 美股周/月K由日K本地聚合：开=区间首日开，收=区间末日收，高=最高，低=最低，量=求和
     out = {}
@@ -387,6 +533,19 @@ async def us_kline(symbol, period, limit, start, end):
         rows = rows[-limit:]
         ind = _ind_slice(ind, n - len(rows), n)
         tail = []
+    if period == "day" and len(tail) >= 2:
+        # 截止日恰为合股/分股生效日：tail 前一根是不复权旧价，换算到截止日股本基准——卡片涨跌
+        # 幅按当天真实涨跌而非跳空虚大（K线图仍画真实历史价，跳空缺口客观存在；周/月K聚合键
+        # 无日粒度，不做此修正）。只改收盘一列，前端仅用它做涨跌基准
+        try:
+            evs = await us_split_events(symbol)
+        except Exception:
+            evs = []
+        for d, m in evs:
+            if d == tail[-1][0]:
+                tail = [list(tail[0]), list(tail[1])]
+                tail[0][2] = str(float(tail[0][2]) / m)
+                break
     return {"symbol": symbol, "period": period, "klines": rows, "ind": ind, "tail": tail}
 
 
@@ -519,6 +678,112 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
     }
 
 
+# ---------- 回测：单票 + 3日线 + K线实体箱体 ----------
+# 口径：docs/回测规则口径.md。与 orders/orders_live 完全隔离，只在内存里重演，不落库。
+BT_PAR_TOL = 0.2  # 两日箱体「平行」阈值：顶对顶、底对底各自偏移不超过前日实体高度的 20%
+
+
+def bt_box(r):
+    # K线箱体 = 实体（开→收）的长方形，上下影线不计
+    o, c = float(r[1]), float(r[2])
+    return max(o, c), min(o, c), abs(c - o)
+
+
+def bt_run(rows, ma3, capital, each):
+    # 逐日重演。rows=[日期,开,收,高,低,量] 升序，ma3 与之等长（含预热，区间首根即有值）
+    cash, qty, cost = float(capital), 0.0, 0.0
+    trades, nav = [], []
+    peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
+    for i, r in enumerate(rows):
+        date, close = r[0][:10], float(r[2])
+        top, bot, hgt = bt_box(r)
+        m = ma3[i] if i < len(ma3) else None
+        # 两日箱体平行（顶∩顶、底∩底都只挪了不到前日实体高度的 20%）→ 当日不买也不卖
+        par = False
+        pbot = ptop = None
+        if i > 0:
+            ptop, pbot, phgt = bt_box(rows[i - 1])
+            tol = phgt * BT_PAR_TOL
+            par = abs(top - ptop) <= tol and abs(bot - pbot) <= tol
+        # 卖出：① 箱体跌破前一日箱体底 ② 实体一半高度掉进 3 日线（实体中点 < MA3）
+        sold = ""
+        if qty > 0 and i > 0 and not par:
+            if bot < pbot:
+                sold = "broke"
+            elif m is not None and (top + bot) / 2 < m:
+                sold = "ma3"
+        if sold:
+            gain = (close - cost) * qty
+            trades.append({"date": date, "side": "sell", "price": round(close, 4),
+                           "qty": round(qty, 4), "amount": round(close * qty, 2),
+                           "realized": round(gain, 2), "reason": sold})
+            cash += close * qty
+            qty, cost = 0.0, 0.0
+            closed += 1
+            realized_all += gain
+            if gain > 0:
+                win += 1
+        # 买入：非平行日且 3 日线在实体底部之下（整根实体站在均线上方）→ 每次买 each 元；卖出当日不再买
+        elif not par and m is not None and m < bot and cash >= each:
+            add = each / close
+            trades.append({"date": date, "side": "buy", "price": round(close, 4),
+                           "qty": round(add, 4), "amount": round(each, 2),
+                           "realized": None, "reason": "ma3"})
+            cash -= each
+            cost = (cost * qty + close * add) / (qty + add)
+            qty += add
+        equity = cash + qty * close  # 净值 = 现金 + 持仓市值（收盘价）
+        if equity > peak:
+            peak = equity
+        dd = equity / peak - 1
+        if dd < mdd:
+            mdd = dd
+        nav.append({"date": date, "equity": round(equity, 2), "pct": round((equity / capital - 1) * 100, 4)})
+    end_eq = nav[-1]["equity"] if nav else float(capital)
+    total = (end_eq / capital - 1) * 100
+    days = 0
+    if len(rows) >= 2:
+        days = (datetime.date.fromisoformat(rows[-1][0][:10]) - datetime.date.fromisoformat(rows[0][0][:10])).days
+    years = days / 365
+    px = [float(r[2]) for r in rows]
+    return {
+        "trades": trades, "nav": nav,
+        "stats": {
+            "capital": round(float(capital), 2), "end": round(end_eq, 2),
+            "total": round(total, 2), "mdd": round(mdd * 100, 2),
+            "ann": round((pow(1 + total / 100, 1 / years) - 1) * 100, 2) if years >= 0.25 else None,
+            "buys": sum(1 for t in trades if t["side"] == "buy"),
+            "sells": closed, "win": win,
+            "winrate": round(win / closed * 100, 1) if closed else None,
+            "realized": round(realized_all, 2),
+            "open_qty": round(qty, 4), "open_cost": round(cost, 4),
+            "float_pnl": round((px[-1] - cost) * qty, 2) if qty > 0 else 0.0,
+            "first": rows[0][0][:10] if rows else "", "last": rows[-1][0][:10] if rows else "",
+            "n": len(rows), "days": days,
+        },
+    }
+
+
+@app.get("/api/backtest")
+async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
+                   capital: float = 100000.0, each: float = 10000.0):
+    if capital <= 0 or each <= 0:
+        return {"error": "本金与单次买入金额需大于 0"}
+    d = await kline(symbol, "day", 800, start, end)  # 复用日K取数口径（含均线预热与区间切片）
+    if d.get("error"):
+        return d
+    rows = d.get("klines") or []
+    if len(rows) < 3:
+        return {"error": "区间内交易日不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
+    res = bt_run(rows, (d.get("ind") or {}).get("ma3") or [], capital, each)
+    ind = d.get("ind") or {}
+    # 回测只用 MA3 判信号，但图面要同时叠 MA3/MA5/MA85/MA125 四条均线供对照
+    res.update({"symbol": symbol, "period": "day", "klines": rows,
+                "ma3": ind.get("ma3") or [],
+                "ind": {k: ind.get(k) or [] for k in ("ma3", "ma5", "ma85", "ma125")}})
+    return res
+
+
 @app.get("/api/minute")
 async def minute(symbol: str = Query(...)):
     if symbol.startswith("us"):
@@ -555,10 +820,12 @@ async def cards_get(scope: str = "hist", as_of: str = ""):
 async def holdings_get(scope: str = "hist", as_of: str = ""):
     # as_of：历史回放视点（YYYY-MM-DD 或 YYYY-MM-DD HH:MM）；只给日期按当天 23:59 含全天，
     # 用于回看某日的持仓——该日之后下的单不出现（如27号买的仓，26号视点里不存在；
-    # 此截断天然保证「检索买入日之前的日期看不到该仓」），买入当天即显示，T+1 只锁卖出按钮
+    # 此截断天然保证「检索买入日之前的日期看不到该仓」），买入当天即显示，T+1 只锁卖出按钮；
+    # 视点当天的卖出次日才生效（defer_today_sell）：份额/收益照卖前显示，可卖仍扣当日已卖
     a = _norm_asof(as_of)
     con = _conn()
-    pos, _, _ = _replay(con, scope=scope, as_of=a)
+    splits = await _splits_for(con, scope)  # 合股/分股事件：跨过生效日的持仓自动换股本基准（市值不变）
+    pos, _, _ = _replay(con, scope=scope, as_of=a, splits=splits, defer_today_sell=True)
     con.close()
     out = []
     for s, p in pos.items():
@@ -570,7 +837,7 @@ async def holdings_get(scope: str = "hist", as_of: str = ""):
         if a is not None and not (p["buy_ts"] and p["buy_ts"] <= a):
             continue
         out.append({"symbol": s, "name": p["name"], "shares": round(p["shares"], 6), "cost": round(p["cost"], 6),
-                    "sellable": round(p["shares"] if _is_t0(s) else p["shares"] - p["bought_today"], 6),
+                    "sellable": round(max(0.0, p["shares"] - (0 if _is_t0(s) else p["bought_today"]) - p["sold_today"]), 6),
                     "buy_ts": p["buy_ts"]})
     return {"holdings": out}
 
@@ -578,7 +845,8 @@ async def holdings_get(scope: str = "hist", as_of: str = ""):
 @app.get("/api/orders")
 async def orders_get(scope: str = "hist", as_of: str = ""):
     # as_of：历史回放视点（同 /api/holdings）——订单列表与已实现收益都只含该时点前的流水：
-    # 回看18号之前的视点看不到18号下的单（及之后卖出落的袋）；realized 按视点重演推导
+    # 回看18号之前的视点看不到18号下的单（及之后卖出落的袋）；realized 按视点重演推导，
+    # 视点当天的卖出次日才计入已实现（与持仓「卖出次日生效」同口径）
     a = _norm_asof(as_of)
     con = _conn()
     sql = f"SELECT id, symbol, name, side, price, qty, ts FROM {_tbl(scope, 'orders')}"
@@ -587,7 +855,8 @@ async def orders_get(scope: str = "hist", as_of: str = ""):
         sql += " WHERE ts <= ?"
         args = (a,)
     rows = con.execute(sql + " ORDER BY ts, id", args).fetchall()
-    _, realized, _ = _replay(con, scope=scope, as_of=a)
+    splits = await _splits_for(con, scope)  # 已实现收益同样要跨事件重演：合股后卖出的成本基准已换算
+    _, realized, _ = _replay(con, scope=scope, as_of=a, splits=splits, defer_today_sell=True)
     con.close()
     # 买入行 realized 为 null（收益由持仓浮动盈亏表达）；realized_total 供抽屉「全部收益=已实现+浮动」
     return {"orders": [{**dict(r), "realized": realized.get(r["id"])} for r in rows],
@@ -603,6 +872,8 @@ async def orders_post(payload: dict, scope: str = "hist"):
     except (TypeError, ValueError):
         raise HTTPException(400, "price/qty 必须是数字")
     ts = _norm_ts(payload.get("ts")) or datetime.datetime.now().strftime(TS_FMT)
+    if ts > datetime.datetime.now().strftime(TS_FMT):
+        raise HTTPException(400, "成交时间不能晚于现在（未来时间的单会提前占用可卖份额）")
     if not sym.startswith(("sh", "sz", "hk", "us")):
         raise HTTPException(400, "symbol 前缀只支持 sh/sz/hk/us")
     if side not in ("buy", "sell"):
@@ -619,16 +890,17 @@ async def orders_post(payload: dict, scope: str = "hist"):
             o = con.execute(f"SELECT name FROM {_tbl(scope, 'orders')} WHERE symbol=? ORDER BY ts DESC, id DESC LIMIT 1",
                              (sym,)).fetchone()
             name = o["name"] if o else sym
+    splits = await _splits_for(con, scope)  # 卖出校验/已实现收益按合股换算后的股本基准重演
     if side == "sell":
         # 卖出上限按「该单业务时点 ts」重演校验（hist 气泡 ts=回放结束日期、手填补录历史单同理）：
         # 不能按当前全量持仓算——回看视点时的持仓与现在不同，超视点持仓的卖出会插队卖超
-        p = _replay(con, scope=scope, as_of=ts)[0].get(sym) or {"shares": 0.0, "bought_today": 0.0}
+        p = _replay(con, scope=scope, as_of=ts, splits=splits)[0].get(sym) or {"shares": 0.0, "bought_today": 0.0}
         avail = p["shares"] if _is_t0(sym) else p["shares"] - p["bought_today"]
         if qty > avail + 1e-9:
             con.close()
             tip = "" if _is_t0(sym) or p["bought_today"] <= 1e-9 else "（A股当日买入次日可卖）"
             raise HTTPException(400, f"卖出数量超过可卖，{ts[:10]} 时可卖 {avail:g}{tip}")
-        old_conflict = _replay(con, scope=scope)[2]  # 存量卖超坏账（正常数据恒 None），供插入后对比
+        old_conflict = _replay(con, scope=scope, splits=splits)[2]  # 存量卖超坏账（正常数据恒 None），供插入后对比
     with con:
         cur = con.execute(f"INSERT INTO {_tbl(scope, 'orders')} (symbol, name, side, price, qty, ts, created_at) "
                           f"VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -637,16 +909,31 @@ async def orders_post(payload: dict, scope: str = "hist"):
     if side == "sell":
         # 时序兜底：落在历史时点的卖出可能挤占其后已录卖出的份额（或自身卖超），插入后全量重演即现冲突——回滚拒单。
         # 与插入前存量冲突比对 id，坏账不误伤新单；买入只会缓解冲突，无需兜底
-        conflict = _replay(con, scope=scope)[2]
+        conflict = _replay(con, scope=scope, splits=splits)[2]
         if conflict and conflict["id"] != (old_conflict or {"id": None})["id"]:
             with con:
                 con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,))
             con.close()
             raise HTTPException(400, f"卖出将超过持仓：{conflict['name']} {conflict['ts']} 的卖出将超过当时可卖，请调小数量")
-    realized = _replay(con, scope=scope)[1].get(oid)
+    realized = _replay(con, scope=scope, splits=splits)[1].get(oid)
     con.close()
     return {"ok": True, "order": {"id": oid, "symbol": sym, "name": name, "side": side,
                                   "price": price, "qty": qty, "ts": ts}, "realized": realized}
+
+
+@app.delete("/api/orders")
+async def orders_clear(scope: str = "hist"):
+    # 一键清空：hist + live 两张流水表一并删光（用户要求全局清空——曾发生只清 live 后 hist 回放表残留
+    # 旧流水、回放视点仍显示旧收益的事故）；持仓清零、收益归 0、可用资金回到本金（皆为流水重演派生，不落库）；
+    # 整表连删不会产生卖超坏账，无需 orders_delete 的删除被依赖预检；卡片与流水独立不受影响
+    con = _conn()
+    n = 0
+    with con:
+        for t in ("orders", "orders_live"):
+            cur = con.execute(f"DELETE FROM {t}")
+            n += cur.rowcount
+    con.close()
+    return {"deleted": n}
 
 
 @app.delete("/api/orders/{oid}")
@@ -655,7 +942,8 @@ async def orders_delete(oid: int, scope: str = "hist"):
     if not con.execute(f"SELECT 1 FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,)).fetchone():
         con.close()
         raise HTTPException(404, "记录不存在")
-    conflict = _replay(con, exclude_id=oid, scope=scope)[2]
+    splits = await _splits_for(con, scope)
+    conflict = _replay(con, exclude_id=oid, scope=scope, splits=splits)[2]
     if conflict:  # 删掉这笔买入会让后续某笔卖出卖超：拒删并点名那笔卖出
         con.close()
         raise HTTPException(400, f"删除被依赖：{conflict['name']} {conflict['ts']} 的卖出将超过可卖持仓，请先删除该笔卖出")
@@ -695,8 +983,16 @@ async def quotes(symbols: str = Query(...)):
             sym = var.strip().removeprefix("v_")
             if len(f) > 4 and f[3] and f[4]:
                 try:
-                    out[sym] = {"price": float(f[3]), "prev": float(f[4])}
-                except ValueError:
+                    price, prev = float(f[3]), float(f[4])
+                    # 合股/分股日腾讯沿用未调整昨收（自算涨跌会虚大十倍）：官方涨跌幅字段 f[32]
+                    # 与自算差超 3% 时按官方值反推有效昨收基准；正常日两者恒一致，零影响
+                    pct = float(f[32]) if len(f) > 32 and f[32] else None
+                    if pct is not None and prev > 0 and abs(price / prev - 1 - pct / 100) > 0.03:
+                        adj = price / (1 + pct / 100)
+                        if adj > 0:
+                            prev = adj
+                    out[sym] = {"price": price, "prev": prev}
+                except (ValueError, ZeroDivisionError):
                     pass
     return {"quotes": out}
 
@@ -731,6 +1027,92 @@ async def cards_delete(symbol: str, scope: str = "hist"):
     return {"ok": True, "deleted": n}
 
 
+# ---------- 画线：趋势线/水平线（前端渲染成一条折线 series，随缩放自动跟随）----------
+DRAW_KINDS = ("trend", "h")
+
+
+@app.get("/api/drawings")
+async def drawings_get(symbol: str = Query(...), period: str = "day"):
+    con = _conn()
+    rows = con.execute("SELECT id, kind, pts FROM drawings WHERE symbol=? AND period=? ORDER BY id",
+                       (symbol, period)).fetchall()
+    con.close()
+    items = []
+    for r in rows:
+        try:
+            pts = json.loads(r["pts"])
+        except ValueError:
+            continue  # 坏数据跳过，不让一条线拖垮整张图
+        items.append({"id": r["id"], "kind": r["kind"], "pts": pts})
+    return {"items": items}
+
+
+@app.post("/api/drawings")
+async def drawings_add(payload: dict):
+    symbol = str(payload.get("symbol") or "").strip()
+    period = str(payload.get("period") or "day").strip()
+    kind = str(payload.get("kind") or "")
+    pts = payload.get("pts") or []
+    if not symbol or kind not in DRAW_KINDS or not 1 <= len(pts) <= 2:
+        raise HTTPException(400, "参数不合法：需 symbol、kind=trend|h、pts 1~2 个点")
+    clean = []
+    for p in pts:
+        try:
+            clean.append({"x": str(p.get("x")), "y": round(float(p.get("y")), 4)})
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(400, "pts 需为 [{x: 类目, y: 价格}]")
+    con = _conn()
+    with con:
+        cur = con.execute("INSERT INTO drawings (symbol, period, kind, pts, created) VALUES (?, ?, ?, ?, ?)",
+                          (symbol, period, kind, json.dumps(clean, ensure_ascii=False),
+                           datetime.datetime.now().strftime(TS_FMT)))
+    con.close()
+    return {"ok": True, "item": {"id": cur.lastrowid, "kind": kind, "pts": clean}}
+
+
+@app.put("/api/drawings/{did}")
+async def drawings_update(did: int, payload: dict):
+    # 端点拖动改线：kind 可从 h 升为 trend（水平线拖一端即变斜线，两端高度可分别调）
+    kind = str(payload.get("kind") or "")
+    pts = payload.get("pts") or []
+    if kind not in DRAW_KINDS or not 1 <= len(pts) <= 2:
+        raise HTTPException(400, "参数不合法：需 kind=trend|h、pts 1~2 个点")
+    clean = []
+    for p in pts:
+        try:
+            clean.append({"x": str(p.get("x")), "y": round(float(p.get("y")), 4)})
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(400, "pts 需为 [{x: 类目, y: 价格}]")
+    con = _conn()
+    with con:
+        cur = con.execute("UPDATE drawings SET kind=?, pts=? WHERE id=?",
+                          (kind, json.dumps(clean, ensure_ascii=False), did))
+    con.close()
+    if not cur.rowcount:
+        raise HTTPException(404, "线不存在")
+    return {"ok": True, "item": {"id": did, "kind": kind, "pts": clean}}
+
+
+@app.delete("/api/drawings/{did}")
+async def drawings_delete(did: int):
+    con = _conn()
+    with con:
+        cur = con.execute("DELETE FROM drawings WHERE id=?", (did,))
+    con.close()
+    if not cur.rowcount:
+        raise HTTPException(404, "线不存在")
+    return {"ok": True, "deleted": cur.rowcount}
+
+
+@app.delete("/api/drawings")
+async def drawings_clear(symbol: str = Query(...), period: str = "day"):
+    con = _conn()
+    with con:
+        cur = con.execute("DELETE FROM drawings WHERE symbol=? AND period=?", (symbol, period))
+    con.close()
+    return {"ok": True, "deleted": cur.rowcount}
+
+
 @app.get("/api/prefs")
 async def prefs_get():
     # 全部界面偏好一次返回 {prefs: {key: value}}；空库返回空对象，前端按默认值渲染
@@ -758,13 +1140,13 @@ async def prefs_put(payload: dict):
 
 @app.get("/api/account")
 async def account_get(scope: str = "hist", as_of: str = ""):
-    # 账户本金与可用资金：可用资金 = 本金 − 累计买入金额 + 累计卖出金额，由 orders 流水重演推导不落库（删单自动重算）
+    # 账户本金与可用资金：可用资金 = 本金 − 累计买入金额 + 累计卖出回笼（次日到账），由 orders 流水重演推导不落库（删单自动重算）
     # as_of：历史回放视点——可用资金同样只算该时点前的流水（18号买的单在17号视点里还没扣钱）
     a = _norm_asof(as_of)
     s = "live" if scope == "live" else "hist"
     con = _conn()
     row = con.execute("SELECT capital FROM account WHERE scope=?", (s,)).fetchone()
-    sql = f"SELECT side, price, qty FROM {_tbl(scope, 'orders')}"
+    sql = f"SELECT side, price, qty, ts FROM {_tbl(scope, 'orders')}"
     args = ()
     if a:
         sql += " WHERE ts <= ?"
@@ -772,8 +1154,11 @@ async def account_get(scope: str = "hist", as_of: str = ""):
     rows = con.execute(sql, args).fetchall()
     con.close()
     capital = row["capital"] if row else 0.0
+    # 卖出回笼资金次日到账（与持仓「卖出次日生效」同口径）：视点日卖出的钱不计入，
+    # 否则当天份额还在市值里、卖出款又已进现金，总资产会凭空多出一笔
+    today = (a or datetime.datetime.now().strftime(TS_FMT))[:10]
     cash = capital - sum(r["price"] * r["qty"] for r in rows if r["side"] == "buy") \
-        + sum(r["price"] * r["qty"] for r in rows if r["side"] == "sell")
+        + sum(r["price"] * r["qty"] for r in rows if r["side"] == "sell" and r["ts"][:10] < today)
     return {"capital": capital, "cash": round(cash, 2)}
 
 
