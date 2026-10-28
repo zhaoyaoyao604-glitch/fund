@@ -1988,7 +1988,7 @@ function ThemeSwitch({ theme, setTheme }) {
 // 交互：选一只标的（下拉搜索 / 点自选卡快捷选）+ 选策略类型与回测区间 → 取对应周期K线算收益曲线。
 // 回测规则全部集中在 btCalc() 里；后续口径（定投/止盈/手续费/仓位等）只改它，弹窗与画图不用动。
 const BT_TERMS = [["近半年", 182], ["近1年", 365], ["近3年", 1095]];  // 快捷区间：按自然日回溯
-// 策略类型（后端 BT_STRATS 同款）：共用同一套箱体 + MA3 金叉 MA5 规则，只是取数周期不同
+// 策略类型（后端 BT_STRATS 同款）：共用同一套 MA3 金叉/死叉规则，只是取数周期不同
 //   day = 日k占Ma3（默认）  m60 = 1小时k占Ma3（每根 1 小时，A股一天 4 根）
 const BT_STRATS = [["day", "日k占Ma3"], ["m60", "1小时k占Ma3"]];
 
@@ -2032,10 +2032,15 @@ function btKOpt(d) {
   // 若轴范围只取 K 线极值，落在区间最高价/最低价那一根的标记会落到坐标系外被 ECharts 直接裁掉
   // （如 9-30 卖出价 1.238，当日高 1.241 就是区间最高，S 一直看不见）。
   const yMin = lo - pad * 1.8, yMax = hi + pad * 1.8;
+  const HALF = "#e6b800";  // 减半仓的黄色三角与字母 S、半份买入的黄色 B，与全清仓的绿色 S、满份买入的红色 B 区分
   const pts = side => trades.filter(t => t.side === side).map(t => {
     const i = cats.indexOf(t.date);
     const r = rows[i] || [];
-    return { value: [t.date, side === "buy" ? +r[4] - pad : +r[3] + pad], t };  // 挂原始成交，tooltip 取用
+    const hf = t.reason === "half" || t.reason === "gb";  // 减半仓（卖一半）：half=回踩进 MA3、gb=绿K走弱
+    const hb = t.reason === "hb";    // 中段回踩的半份买入
+    return { value: [t.date, side === "buy" ? +r[4] - pad : +r[3] + pad], t,
+      itemStyle: (hf || hb) ? { color: HALF } : null,
+      label: (hf || hb) ? { show: true, formatter: side === "buy" ? "B" : "S", color: HALF } : null };  // 挂原始成交，tooltip 取用
   });
   const tip = ps => {
     const dt = ps[0].axisValue;
@@ -2044,8 +2049,8 @@ function btKOpt(d) {
     let s = `${dt}<br/>开 ${r[1]} 收 ${r[2]} 高 ${r[3]} 低 ${r[4]}`;
     mas.forEach(m => { if (m.data[i] != null) s += `<br/><span style="color:${m.color}">${m.name} ${m.data[i]}</span>`; });
     trades.filter(t => t.date === dt).forEach(t => {
-      const c = t.side === "buy" ? P.up : P.dn;
-      s += `<br/><b style="color:${c}">${t.side === "buy" ? "买入" : "卖出"}</b> ${t.price} × ${t.qty} = ${t.amount}`;
+      const c = t.side === "buy" ? (t.reason === "hb" ? HALF : P.up) : ((t.reason === "half" || t.reason === "gb") ? HALF : P.dn);
+      s += `<br/><b style="color:${c}">${t.side === "buy" ? (t.reason === "hb" ? "买一半" : "买入") : ((t.reason === "half" || t.reason === "gb") ? "卖一半" : "卖出")}</b> ${t.price} × ${t.qty} = ${t.amount}`;
       if (t.realized != null) s += ` 本笔盈亏 ${t.realized >= 0 ? "+" : ""}${t.realized}`;
     });
     return s;
@@ -2248,7 +2253,7 @@ function BtHistory({ onClose, theme, onNew }) {
               ${busy && html`<span style=${{ color: "var(--tx-5)" }}>读取中…</span>`}
             </div>
             <div className="btrchart" ref=${refK}></div>
-            <div className="btrule">图上 B=买入、S=卖出；均线与成交口径同「回测」弹窗：箱体=开→收实体（日K 按日、1小时K 按每根 60 分钟），MA3 金叉上穿 MA5（由不高于 MA5 转为高于 MA5）且不高于实体底 + 20% 实体高度（实体至少 80% 站上均线）、实体底高于前一根实体底才买（MA3 死叉下行时仅凭箱体占上 MA3 也不买）；跌破前一根箱体、箱体顶部未高于前一根顶部、或实体一半落进 MA3 则清仓，按收盘价成交、不计手续费。</div>
+            <div className="btrule">图上 B=买入、S=卖出；口径同「回测」弹窗：MA3 上穿 MA5（由不高于 MA5 转为高于 MA5）当根起每根都买（每次=弹窗里「每次买入」的金额，但实体须至少 80% 站在 MA3 上方、整根 K 线也过半在 MA3 上方、底高于前一根且 MA3 朝上）；另有一条半份买入：实体落进 MA3 的部分在 20%~45% 之间、当根是红 K、实体顶高于前一根实体顶、MA3 上行且涨幅不小于 0.5% 时只买半份（图上黄色 B）；日K 按日、1小时K 按每根 60 分钟），MA3 下穿 MA5（死叉）当根、或出现弱势走平箱体（实体顶与底都没高于前一根）当根全部清仓（A 股另加：当根收盘较前一根收盘跌 4% 及以上也全清），若实体已有一半落进 MA3 线内且 MA3 仍向上、或当根是绿 K 且顶低于前一根顶但箱体仍在 MA3 上方，则只卖一半（黄色 S）；被清仓后 MA3 仍在 MA5 上方且仍上行、当根实体底高于前一根实体底 + 前一根实体高度的 2/3 时当根恢复买；按收盘价成交、不计手续费。</div>
           </div>`}
         </div>
       </div>
@@ -2401,7 +2406,7 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
         <span className="btrow">每次买入：
           <input value=${each} onChange=${ev => setEach(ev.target.value)} style=${{ width: 90 }} />
         </span>
-        <span className="btrow" title="策略类型：日K 与 1小时K 用同一套箱体 + MA3 金叉 MA5 规则，只是 K 线周期不同">
+        <span className="btrow" title="策略类型：日K 与 1小时K 用同一套 MA3 金叉/死叉规则，只是 K 线周期不同">
           策略：
           <select value=${strat} onChange=${ev => setStrat(ev.target.value)}>
             ${BT_STRATS.map(([k, t]) => html`<option key=${k} value=${k}>${t}</option>`)}
@@ -2439,7 +2444,7 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
             <span>区间<b>${st.first} ~ ${st.last}</b></span>
           </div>
           <div className="btkchart" ref=${refK}></div>
-          <div className="btdeal">成交明细（${trades.length} 笔；K线上 B=买入、S=卖出）</div>
+          <div className="btdeal">成交明细（${trades.length} 笔；K线上 B=买入、黄色 B=买一半、S=卖出、黄色 S=卖一半）</div>
           ${trades.length === 0 && html`<div className="btph">区间内未触发任何买卖信号</div>`}
           ${trades.length > 0 && html`<div className="bttbl">
             <div className="bttr bthd2"><span>日期</span><span>方向</span><span>价格</span><span>数量</span><span>金额</span><span>本笔盈亏</span><span>触发</span></div>
@@ -2450,14 +2455,16 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
               <span>${t.qty}</span>
               <span>${t.amount}</span>
               <span className=${t.realized == null ? "" : (t.realized >= 0 ? "up" : "dn")}>${t.realized == null ? "—" : sg(t.realized)}</span>
-              <span className="btrs">${t.side === "buy" ? "MA3 金叉 MA5 + 实体≥80% 站上 MA3" : (t.reason === "broke" ? (isMin ? "跌破前一根箱体" : "跌破前日箱体") : (t.reason === "ntop" ? "箱体顶部未抬高" : "实体一半落进 MA3"))}</span>
+              <span className="btrs">${t.side === "buy"
+                ? (t.reason === "hb" ? "实体 20%~45% 落进 MA3、红K、实体顶抬高、MA3 明显上行（买一半）" : (t.reason === "add" ? "金叉区间内每日加仓" : (t.reason === "back" ? "箱体重新向好，恢复买入" : "MA3 金叉 MA5（首笔）")))
+                : (t.reason === "gb" ? "绿K、顶未抬高、箱体仍在 MA3 上方（卖一半）" : (t.reason === "half" ? "实体一半落进 MA3、MA3 仍向上（卖一半）" : (t.reason === "drop" ? "A股当日跌 4%（止损清仓）" : (t.reason === "dc" ? "MA3 死叉 MA5（清仓）" : (t.reason === "weak" ? "箱体顶底都未抬高（弱势走平，清仓）" : (t.reason === "broke" ? (isMin ? "跌破前一根箱体" : "跌破前日箱体") : (t.reason === "ntop" ? "箱体顶部未抬高" : "实体一半落进 MA3")))))))}</span>
             </div>`)}
           </div>`}
           <div className="btnavhd">资金曲线（现金 + 持仓市值）</div>
           <div className="btnavchart" ref=${refNav}></div>
           <div className="btrule">口径：${isMin
-            ? `箱体=当根 60 分钟K 的开→收实体；3 根均线金叉 5 根均线（MA3 由不高于 MA5 转为高于 MA5）且 MA3 不高于实体底 + 20% 实体高度、实体底高于前一根实体底才买（每次 ${each || "10000"} 元），MA3 死叉下行时仅凭箱体占上 MA3 也不买；相邻两根顶对顶、底对底偏差 ≤ 前一根实体高度 20% 算平行，当根不动；跌破前一根箱体、箱体顶部未高于前一根顶部或实体一半落进 3 根均线则清仓；按当根收盘价成交、不计手续费。`
-            : `箱体=当日开→收实体；3 日线金叉 5 日线（MA3 由不高于 MA5 转为高于 MA5）且 MA3 不高于实体底 + 20% 实体高度、实体底高于前一日实体底才买（每次 ${each || "10000"} 元），MA3 死叉下行时仅凭箱体占上 MA3 也不买；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体、箱体顶部未高于前日顶部或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。`}</div>
+            ? `MA3 上穿 MA5（由不高于 MA5 转为高于 MA5）的那一根起，往后每根都买（每次 ${each || "10000"} 元，但要求实体至少 80% 站在 MA3 上方——MA3 不高于实体底 + 20% 实体高度、在实体顶之下，且不高于整根 K 线最高最低的中点——且当根实体底高于前一根实体底，且 MA3 比前一根至少高 0.5%（MA3 涨幅不到 0.5% 算走平，与下行一样不买），清仓后第一笔不另加实体条件；另有一条半份买入：实体落进 MA3 的部分在 20%~45% 之间、当根是红 K（收盘高于开盘）、实体顶高于前一根实体顶、MA3 仍上行且涨幅不小于 0.5% 时只买半份，图上标黄色 B），直到 MA3 下穿 MA5（死叉）或出现弱势走平箱体（当根实体顶未高于前一根、实体底也未高于前一根）的那一根把持仓全部清仓（A 股另加一条：当根收盘较前一根收盘跌 4% 及以上也全部清仓）；若当根实体已有一半落进 MA3 线内（MA3 不低于实体底 + 一半实体高度、仍在实体顶之下）且 MA3 仍向上，则先卖掉当前持仓的一半（图上黄色 S）；另若当根是绿 K、实体顶低于前一根实体顶、箱体仍大部分在 MA3 上方（MA3 不高于实体底 + 20% 实体高度）且 MA3 仍向上，也先卖一半（同样黄色 S）；每轮持仓只减一次；现金不足一次买入额就停手；被清仓后若 MA3 仍在 MA5 上方且仍上行、当根实体底高于前一根实体底 + 前一根实体高度的 2/3，则当根恢复每天买，否则等下一次金叉；按当根收盘价成交、不计手续费。`
+            : `MA3 上穿 MA5（由不高于 MA5 转为高于 MA5）的那一天起，往后每天都买（每次 ${each || "10000"} 元，但要求实体至少 80% 站在 MA3 上方——MA3 不高于实体底 + 20% 实体高度、在实体顶之下，且不高于整根 K 线最高最低的中点——且当日实体底高于前一日实体底，且 MA3 比前一根至少高 0.5%（MA3 涨幅不到 0.5% 算走平，与下行一样不买），清仓后第一笔不另加实体条件；另有一条半份买入：实体落进 MA3 的部分在 20%~45% 之间、当根是红 K（收盘高于开盘）、实体顶高于前一根实体顶、MA3 仍上行且涨幅不小于 0.5% 时只买半份，图上标黄色 B），直到 MA3 下穿 MA5（死叉）或出现弱势走平箱体（当日实体顶未高于前一日、实体底也未高于前一日）的那一天把持仓全部清仓（A 股另加一条：当日收盘较前一日收盘跌 4% 及以上也全部清仓）；若当根实体已有一半落进 MA3 线内（MA3 不低于实体底 + 一半实体高度、仍在实体顶之下）且 MA3 仍向上，则先卖掉当前持仓的一半（图上黄色 S）；另若当根是绿 K、实体顶低于前一根实体顶、箱体仍大部分在 MA3 上方（MA3 不高于实体底 + 20% 实体高度）且 MA3 仍向上，也先卖一半（同样黄色 S）；每轮持仓只减一次；现金不足一次买入额就停手；被清仓后若 MA3 仍在 MA5 上方且仍上行、当日实体底高于前一日实体底 + 前一日实体高度的 2/3，则当日恢复每天买，否则等下一次金叉；按收盘价成交、不计手续费。`}</div>
         </div>`}
       </div>
     </div>
@@ -2676,18 +2683,18 @@ function SignalBar() {
   }, []);
   const items = (d && d.items) || [];
   const hits = items.filter(it => it.hit).sort((a, b) => b.pct - a.pct);
-  const best = items.filter(it => !it.hit && it.bull && it.pct > 0).sort((a, b) => b.pct - a.pct).slice(0, 8);
+  const best = items.filter(it => !it.hit && it.pct > 0).sort((a, b) => b.pct - a.pct).slice(0, 8);
   const pc = v => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
   return html`<div className="sigbar">
     <span className="sigtag">信号</span>
     ${!d && html`<span className="sigph">扫描中…</span>`}
     ${d && hits.length === 0 && html`<span className="sigph">今日无买点</span>`}
     ${hits.map(it => html`<span key=${it.symbol} className=${"sigitem buy" + (it.pct < 0 ? " dn" : "")}
-      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 上穿 MA5 ${it.ma5} · 箱体底抬高 · ${it.live ? "盘中价" : "休市按最后收盘"}`}>
+      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 在 MA5 ${it.ma5} 上方（金叉区间，每天买 1 万）· ${it.live ? "盘中价" : "休市按最后收盘"}`}>
       <b>●</b>${it.name || it.symbol}<em>${pc(it.pct)}</em><i>可买</i></span>`)}
     ${hits.length > 0 && best.length > 0 && html`<span className="sigsep"></span>`}
     ${best.map(it => html`<span key=${it.symbol} className="sigitem"
-      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 在 MA5 ${it.ma5} 上方且仍上行`}>${it.name || it.symbol}<em>${pc(it.pct)}</em></span>`)}
+      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 未站上 MA5 ${it.ma5}（不在买入区间）`}>${it.name || it.symbol}<em>${pc(it.pct)}</em></span>`)}
     <span className="sigend">
       <span className="sigph">${d ? `更新 ${d.at}` : ""}</span>
       <button className="sigre" title="立刻重扫一遍" disabled=${busy} onClick=${load}>${busy ? "扫描中…" : "刷新"}</button>

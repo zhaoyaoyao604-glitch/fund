@@ -28,10 +28,14 @@ _chan = {"i": 0}  # 上次取数成功的通道下标（0/1=ifzq 双域，2=prox
 WEB = "https://web.ifzq.gtimg.cn/appstock/app"  # minute（分时）
 BARE = "https://web.ifzq.gtimg.cn/appstock/app"  # fqkline（日/周/月K） / mkline（分钟K）
 EM_SUGGEST = "https://searchapi.eastmoney.com/api/suggest/get"  # 东财搜索
+EM_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"  # 东财日/分钟K：ifzq 全域被 WAF 挑战时的兜底源
+EM_SECID = {"sh": "1.", "sz": "0.", "hk": "116."}  # 东财市场号：沪/深/港（us 走独立链路）
 EM_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # 东财网页端公开 token
 QT = "https://qt.gtimg.cn/q="  # 腾讯实时报价（GBK文本），美股补当日活动K线用
 SINA_US_DAILY = "https://stock.finance.sina.com.cn/usstock/api/jsonp_v2.php/var%20_t=/US_MinKService.getDailyK"  # 新浪美股日K全历史（不复权）
 EM_TRENDS = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"  # 东财分时（美股）
+SINA_A_KLINE = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"  # 新浪A股K线兜底（不复权）
+SINA_HK_KLINE = "https://finance.sina.com.cn/stock/hkstock/{}/klc2_kl.js"  # 新浪港股全历史日K（K2 加密格式，node 解密，不复权）
 DAY_PERIODS = {"day", "week", "month"}
 MIN_PERIODS = {"m5", "m15", "m30", "m60"}
 TS_FMT = "%Y-%m-%d %H:%M"  # 订单时间戳统一成定长格式，SQL 里 ORDER BY ts 字典序即时间序
@@ -400,6 +404,92 @@ async def get_text(url, gbk=False):
     return data
 
 
+def _em_secid(symbol):
+    return EM_SECID[symbol[:2]] + symbol[2:]
+
+
+def _curl_json(url, timeout=10):
+    # 东财 CDN 按 TLS 指纹掐 Python 客户端（httpx 与标准库 urllib 直连都被断「Server disconnected」，
+    # curl/浏览器正常）：借系统自带 curl.exe 直连取数。--noproxy 防环境变量里 VPN 残留的本地代理
+    # （http://127.0.0.1:50625，VPN 一关就死）连累；在线程池里跑避免阻塞事件循环
+    r = subprocess.run(["curl", "-s", "--noproxy", "*", "-m", str(timeout), "-A", UA["User-Agent"], url],
+                       capture_output=True, timeout=timeout + 5,
+                       # 后端可能跑在无控制台的分离进程里（pythonw / 分离式拉起），不给这个标志时
+                       # 每个 curl 子进程都会在桌面新建一个黑窗闪一下——桌面一闪一闪就是它
+                       creationflags=0x08000000)  # CREATE_NO_WINDOW
+    return json.loads(r.stdout.decode("utf-8"))
+
+
+_EM_KLINE_CACHE = {}  # url -> (ts, rows)：同 URL 30 秒内存缓存，口径同 _CACHE
+
+
+async def em_kline(symbol, period, cnt):
+    # 东财K线兜底：ifzq/proxy 全线被 WAF 挑战时降级取数。fqt=1 前复权与腾讯 qfq 口径一致；
+    # fields2=f51..f56 字段序（日期,开,收,高,低,量）与腾讯 klines 完全相同，下游零改动。
+    # end=20500101+lmt=N 返回最近 N 根（带 beg 会从头数，取不到最新）。
+    klt = {"day": 101, "week": 102, "month": 103, "m5": 5, "m15": 15, "m30": 30, "m60": 60}[period]
+    url = (f"{EM_KLINE}?secid={_em_secid(symbol)}&ut={EM_TOKEN}"
+           f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56"
+           f"&klt={klt}&fqt=1&end=20500101&lmt={cnt}")
+    now = time.time()
+    hit = _EM_KLINE_CACHE.get(url)
+    if hit and now - hit[0] < TTL:
+        ks = hit[1]
+    else:
+        try:
+            d = await asyncio.to_thread(_curl_json, url)
+        except Exception:
+            raise HTTPException(502, "东财K线兜底源也返回异常，请稍后重试")
+        ks = ((d.get("data") or {}).get("klines")) or []
+        if len(_EM_KLINE_CACHE) > 300:
+            _EM_KLINE_CACHE.clear()
+        _EM_KLINE_CACHE[url] = (now, ks)
+    rows = []
+    for s in ks:
+        p = s.split(",")
+        if len(p[0]) > 10:  # 分钟K时间戳 "2026-10-28 14:50" → "202610281450"，对齐腾讯 12 位紧凑串口径
+            p[0] = p[0].replace("-", "").replace(" ", "").replace(":", "")
+        rows.append(p)
+    return rows
+
+
+async def sina_kline(symbol, period, cnt):
+    # 新浪A股K线（末级兜底，仅 sh/sz）：腾讯被 WAF 挑战 + 东财限流时仍能出图。
+    # 注意新浪是不复权价，除权日附近历史K线与腾讯/东财的前复权口径会有差异（服务恢复即回到主源）
+    # 周/月K用日K粒度取数后本地聚合（口径同美股 resample）
+    scale = {"day": 240, "week": 240, "month": 240, "m5": 5, "m15": 15, "m30": 30, "m60": 60}[period]
+    txt = await get_text(f"{SINA_A_KLINE}?symbol={symbol}&scale={scale}&ma=no&datalen={cnt}")
+    try:
+        arr = json.loads(txt)
+        rows = []
+        for r in arr:
+            d = r["day"] if period == "day" else r["day"].replace("-", "").replace(" ", "").replace(":", "")
+            rows.append([d, r["open"], r["close"], r["high"], r["low"], r["volume"]])  # 对齐腾讯 klines 字段序
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(502, "新浪K线兜底源返回异常，请稍后重试")
+    if period in ("week", "month"):
+        rows = resample(rows, period)  # 新浪只有日K粒度：周/月K本地聚合（口径同美股）
+    return rows
+
+
+async def sina_hk_kline(symbol, period, cnt):
+    # 新浪港股K线（末级兜底）：klc2_kl.js 是 K2 加密格式，用 hk_decode.js（node，解密逻辑取自
+    # akshare 同款实现）解出全历史日K。不复权，除净日附近与腾讯/东财前复权口径有差异
+    txt = await get_text(SINA_HK_KLINE.format(symbol[2:]))
+    try:
+        out = await asyncio.to_thread(
+            subprocess.run, ["node", str(Path(__file__).resolve().parent / "hk_decode.js")],
+            input=txt.encode("utf-8"), capture_output=True, timeout=20,
+            creationflags=0x08000000)  # CREATE_NO_WINDOW：同 _curl_json，不闪黑框
+        arr = json.loads(out.stdout.decode("utf-8"))
+        rows = [[r["date"][:10], r["open"], r["close"], r["high"], r["low"], r["volume"]] for r in arr]
+    except (ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        raise HTTPException(502, "新浪港股K线兜底源解析失败，请稍后重试")
+    if period in ("week", "month"):
+        rows = resample(rows, period)
+    return rows
+
+
 _US_ROWS = {}   # usXXX -> (ts, 新浪全历史日K行)：避免每次请求重复解析几百KB
 _US_SECID = {}  # usXXX -> 东财 secid（105/106/107.XXX）：跨请求记忆市场号
 
@@ -574,7 +664,7 @@ async def _em_trends(secid):
     url = (f"{EM_TRENDS}?secid={secid}&ndays=1&iscr=0&fields1=f1,f2,f3,f4,f5,f6,f7,f8"
            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58")
     try:
-        d = await get_json(url, referer="https://quote.eastmoney.com/", timeout=6)
+        d = await asyncio.to_thread(_curl_json, url)  # 东财掐 Python 客户端连接，走系统 curl（见 _curl_json 注释）
     except Exception:
         return None
     return d.get("data") or {}
@@ -665,18 +755,38 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
         return await us_kline(symbol, period, limit, start, end)
     if period in DAY_PERIODS:
         cnt = 800 if (start or end) else limit + MA_WARM  # 筛选态多取防目标区间落在窗口外；平时多取供均线预热
-        d = (await get_json(f"{BARE}/fqkline/get?param={symbol},{period},,,{cnt},qfq"))["data"][symbol]
-        # 前复权键：A股为 qfqday/qfqweek/qfqmonth，港美股无复权用 day/week/month
-        key = ("qfq" + period) if ("qfq" + period) in d else period
+        try:
+            d = (await get_json(f"{BARE}/fqkline/get?param={symbol},{period},,,{cnt},qfq"))["data"][symbol]
+            # 前复权键：A股为 qfqday/qfqweek/qfqmonth，港美股无复权用 day/week/month
+            key = ("qfq" + period) if ("qfq" + period) in d else period
+            raw = d[key]
+        except HTTPException:  # 腾讯 ifzq/proxy 全线被 WAF 挑战：逐级降级 东财(curl) → 新浪（A股/港股）
+            try:
+                raw = await em_kline(symbol, period, cnt)
+            except HTTPException:
+                if symbol.startswith("hk"):
+                    raw = await sina_hk_kline(symbol, period, cnt)
+                elif symbol[:2] in ("sh", "sz"):
+                    raw = await sina_kline(symbol, period, cnt)
+                else:
+                    raise
     elif period in MIN_PERIODS:
-        d0 = (await get_json(f"{BARE}/kline/mkline?param={symbol},{period},,{limit + MA_WARM}")).get("data")  # 分钟K同样多取预热
-        d = (d0.get(symbol) or {}) if isinstance(d0, dict) else {}
-        if not d.get(period):
+        raw = None
+        try:
+            d0 = (await get_json(f"{BARE}/kline/mkline?param={symbol},{period},,{limit + MA_WARM}")).get("data")  # 分钟K同样多取预热
+            d = (d0.get(symbol) or {}) if isinstance(d0, dict) else {}
+            raw = d.get(period)
+        except HTTPException:
+            pass
+        if not raw:  # 腾讯分钟K拿不到（被 WAF 拦或该标的本就不支持）：逐级降级 东财(curl) → 新浪（A股）
+            try:
+                raw = await em_kline(symbol, period, limit + MA_WARM)
+            except HTTPException:
+                raw = await sina_kline(symbol, period, limit + MA_WARM) if symbol[:2] in ("sh", "sz") else None
+        if not raw:
             return {"error": "该标的暂不支持分钟K（腾讯源分钟K仅A股/ETF可用）"}
-        key = period
     else:
         return {"error": f"period 只支持: {sorted(DAY_PERIODS | MIN_PERIODS)}"}
-    raw = d[key]
     ind = indicators([float(r[2]) for r in raw])  # 指标在全量取数上算（含预热段），再切片对齐返回窗口
     if start or end:
         s, e = start.replace("-", ""), end.replace("-", "")
@@ -701,8 +811,18 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
 
 # ---------- 回测：单票 + 3 根均线 + K线实体箱体（策略类型见 BT_STRATS）----------
 # 口径：docs/回测规则口径.md。与 orders/orders_live 完全隔离，只在内存里重演，不落库。
-BT_PAR_TOL = 0.2  # 两日箱体「平行」阈值：顶对顶、底对底各自偏移不超过前根实体高度的 20%
-BT_PENET = 0.2    # 买入允许 MA3 侵入实体的高度比例：0.2 即实体至少 80% 的高度站在均线上方
+# 买卖只看均线：MA3 上穿 MA5 当根起每根都买，MA3 下穿 MA5（死叉）当根全部清仓；箱体条件不再参与买入，
+# 只用于卖出后重新入场的确认：今日实体底高于前一根实体底 + 前一根实体高度的 2/3 才算箱体重新向好
+BT_RESUME = 2.0 / 3.0
+# 买入硬过滤①：MA3 最多侵入实体底部 20% 高度（实体至少 80% 站在 MA3 上方），且 MA3 必须在实体顶之下
+BT_PENET = 0.2
+# A 股专用硬止损：当日收盘较前一根收盘跌 4% 及以上（含 4%）→ 全部清仓
+BT_DROP = 0.04
+# 半份买入（v2.6，2026-10-29）：正常买入被「实体 80% 站上 MA3」挡住、但实体落进 MA3 的部分在 20%~45% 之间的
+# 中段回踩——只要这根是红 K、实体顶高于前一根实体顶、MA3 上行且幅度 ≥ 0.1%，就买半份（每次买入额的一半），图上黄色 B
+BT_HBODY = 0.45
+# 「MA3 趋势向上」的最小斜率：当根 MA3 相对前一根至少涨 0.5%，才算向上（只看高低不算趋势）
+BT_UP = 0.005
 # 策略类型：两套共用同一份 bt_run 规则，只有取数周期不同
 #   day=日k占Ma3（默认，每根=1 个交易日）  m60=1小时k占Ma3（每根=1 小时，A股每天 4 根）
 # m60 的根数上限：腾讯分钟K 单次最多约 800 根（超过 800 上游回落到 320 根），故 limit+MA_WARM 卡在 800
@@ -726,9 +846,8 @@ def bt_box(r):
 
 
 def bt_gc(ma3, ma5, i):
-    # MA3 金叉 MA5：当根 MA3 由「不高于 MA5」翻到「高于 MA5」才算金叉，只认上穿的那一根。
-    # 反向（死叉，MA3 在 MA5 下方或从上方翻下来）以及「已在 MA5 上方但没再上穿」都不买——
-    # 所以即使实体整体（或大部分）站上 MA3，只要 MA3 没有金叉上行，同样不买。
+    # MA3 金叉 MA5：当根 MA3 由「不高于 MA5」翻到「高于 MA5」，只认上穿的那一根。
+    # 金叉是买入区间的起点：当根买第一笔，之后每根继续买，直到 bt_dc 死叉清仓。
     if i <= 0 or i >= len(ma3) or i >= len(ma5):
         return False
     a, b, pa, pb = ma3[i], ma5[i], ma3[i - 1], ma5[i - 1]
@@ -737,58 +856,128 @@ def bt_gc(ma3, ma5, i):
     return a > b and pa <= pb
 
 
-def bt_run(rows, ma3, ma5, capital, each):
-    # 逐日重演。rows=[日期,开,收,高,低,量] 升序，ma3/ma5 与之等长（含预热，区间首根即有值）
+def bt_dc(ma3, ma5, i):
+    # MA3 死叉 MA5：当根 MA3 由「不低于 MA5」翻到「低于 MA5」，只认下穿的那一根 → 当根收盘价清仓
+    if i <= 0 or i >= len(ma3) or i >= len(ma5):
+        return False
+    a, b, pa, pb = ma3[i], ma5[i], ma3[i - 1], ma5[i - 1]
+    if None in (a, b, pa, pb):
+        return False
+    return a < b and pa >= pb
+
+
+def bt_run(rows, ma3, ma5, capital, each, stop_drop=False):
+    # 逐日重演。rows=[日期,开,收,高,低,量] 升序，ma3/ma5 与之等长（含预热，区间首根即有值）；
+    # stop_drop=True 时（仅 A 股）启用「当日跌 4% 硬止损」
     cash, qty, cost = float(capital), 0.0, 0.0
     trades, nav = [], []
     peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
+    long_on = False  # 是否处在「金叉之后、死叉之前」的每日买入区间
+    half_done = False  # 本轮持仓是否已经做过一次「减半仓」，每次全部清仓后重置
     for i, r in enumerate(rows):
         date = r[0][:16] if len(r[0]) > 10 else r[0][:10]  # 日K 到日，1 小时K 到分钟
         close = float(r[2])
-        top, bot, hgt = bt_box(r)
         m = ma3[i] if i < len(ma3) else None
-        # 两日箱体平行（顶∩顶、底∩底都只挪了不到前日实体高度的 20%）→ 当日不买也不卖
-        par = False
-        pbot = ptop = None
+        top, bot, hgt = bt_box(r)
+        ptop = pbot = phgt = None
         if i > 0:
             ptop, pbot, phgt = bt_box(rows[i - 1])
-            tol = phgt * BT_PAR_TOL
-            par = abs(top - ptop) <= tol and abs(bot - pbot) <= tol
-        # 卖出：① 箱体跌破前一日箱体底 ② 箱体顶部没抬过前一日箱体顶（顶未抬高即不再上行）
-        # ③ 实体一半高度掉进 3 日线（实体中点 < MA3）；①③ 为原有口径，②为追加的顶未抬高清仓
+        # 卖出：① MA3 死叉 MA5 当根全清；② A 股当日跌 4% 硬止损；③ 弱势走平箱体——今日实体顶未高于前一日、
+        # 实体底也未高于前一日（顶没抬、底还更低）。三种清仓都退出买入区间，按后面「重新入场」条件恢复
         sold = ""
-        if qty > 0 and i > 0 and not par:
-            if bot < pbot:
-                sold = "broke"
-            elif top <= ptop:
-                sold = "ntop"
-            elif m is not None and (top + bot) / 2 < m:
-                sold = "ma3"
+        prev_close = float(rows[i - 1][2]) if i > 0 else None
+        prev_m = ma3[i - 1] if i > 0 and i - 1 < len(ma3) else None
+        if bt_dc(ma3, ma5, i):
+            sold = "dc"
+        elif qty > 0 and stop_drop and prev_close and close <= prev_close * (1 - BT_DROP):
+            sold = "drop"
+        elif qty > 0 and ptop is not None and top <= ptop and bot <= pbot:
+            sold = "weak"
         if sold:
-            gain = (close - cost) * qty
+            long_on = False
+            half_done = False
+            if qty > 0:
+                gain = (close - cost) * qty
+                trades.append({"date": date, "side": "sell", "price": round(close, 4),
+                               "qty": round(qty, 4), "amount": round(close * qty, 2),
+                               "realized": round(gain, 2), "reason": sold})
+                cash += close * qty
+                qty, cost = 0.0, 0.0
+                closed += 1
+                realized_all += gain
+                if gain > 0:
+                    win += 1
+        # 减半仓（两种，每轮持仓只减一次）：
+        #   ① half：实体已有一半落进 MA3 线内（MA3 ≥ 实体底 + 半个实体高度，且仍在实体顶之下）+ MA3 仍上行；
+        #   ② gb：绿 K（收 < 开）+ 实体顶低于前一根实体顶 + 箱体大部分仍在 MA3 上方（MA3 ≤ 实体底 + 20% 实体高度，
+        #      含 MA3 在实体底下方）+ MA3 仍上行——价格还没跌到 MA3 但已走弱，先卖掉当前持仓的一半
+        half = ""
+        if (not sold and not half_done and qty > 0 and m is not None and prev_m is not None
+                and m > prev_m):
+            if bot + hgt * 0.5 <= m < top:
+                half = "half"
+            elif (close < float(r[1]) and ptop is not None and top < ptop
+                  and m <= bot + BT_PENET * hgt):
+                half = "gb"
+        if half:
+            half_done = True
+            hq = qty * 0.5
+            gain = (close - cost) * hq
             trades.append({"date": date, "side": "sell", "price": round(close, 4),
-                           "qty": round(qty, 4), "amount": round(close * qty, 2),
-                           "realized": round(gain, 2), "reason": sold})
-            cash += close * qty
-            qty, cost = 0.0, 0.0
-            closed += 1
+                           "qty": round(hq, 4), "amount": round(close * hq, 2),
+                           "realized": round(gain, 2), "reason": half})
+            cash += close * hq
+            qty -= hq
             realized_all += gain
-            if gain > 0:
-                win += 1
-        # 买入：非平行日 + 3 日线金叉 5 日线（MA3 上穿 MA5 的那一根，见 bt_gc）
-        # + 3 日线不高于「实体底 + 20% 实体高度」（实体至少 80% 站在均线上方，允许均线浅穿下沿）
-        # + 3 日线仍在实体顶之下（整根实体不会沉到均线下方）+ 实体底部高于前一日实体底部
-        # （箱体在抬高，未抬高即不买）→ 每次买 each 元；卖出当日不再买；区间首根无前日，上述含前日
-        # 比较的条件都不成立（不买）。金叉是硬闸门：MA3 死叉下行时只有箱体占上 MA3 也不买
-        # 实体高度为 0（一字线）时 bot + 0.2 * hgt 退化为 bot，条件即旧口径的 MA3 < 实体顶 = 实体底
-        elif (not par and m is not None and bt_gc(ma3, ma5, i)
-              and m <= bot + BT_PENET * hgt and m < top
-              and (pbot is None or bot > pbot) and cash >= each):
+        # 买入：MA3 上穿 MA5 当根起进入买入区间，此后每根都买 each 元（金叉当根记 gc，其后记 add），
+        # 现金不足 each 时停手（本金 10 万 ÷ 每次 1 万 = 最多连买 10 根），清仓后再等下一次金叉；卖出当根不买
+        gc = (not sold) and bt_gc(ma3, ma5, i)
+        # 卖出后重新入场：未死叉（MA3 仍在 MA5 上方）且 MA3 仍上行，同时箱体重新向好——
+        # 今日实体底高于「前一根实体底 + 前一根实体高度 × 2/3」。满足即恢复每日买
+        resume = (not sold and i > 0 and m is not None and i < len(ma5) and ma5[i] is not None
+                  and ma3[i - 1] is not None and m > ma5[i] and m > ma3[i - 1]
+                  and pbot is not None and bot > pbot + phgt * BT_RESUME)
+        # 区间首根没有「上一根」可比：若首根 MA3 已在 MA5 上方（金叉发生在区间之前），按已在买入区间处理
+        was_on = long_on
+        if gc or resume or (i == 0 and m is not None and i < len(ma5) and ma5[i] is not None and m > ma5[i]):
+            long_on = True
+        # 买入硬过滤（金叉/重新入场只是入场开关，实体不合格照样不买）：
+        # ① 箱体大部分在 MA3 上方：MA3 ≤ 实体底 + 20% 实体高度，且 MA3 < 实体顶；
+        #    且按整根 K 线（最高~最低）算也过半——MA3 不高于（最高+最低）/2
+        # ② 今日实体底高于前一根实体底（最底部在抬高）；
+        # ③ MA3 必须朝上（当根 MA3 高于前一根），走平或下行不买。任一不满足，当根不买
+        hi, lo = float(r[3]), float(r[4])
+        body_ok = (m is not None and m <= bot + BT_PENET * hgt and m < top
+                   and m <= (hi + lo) / 2)
+        lift_ok = pbot is None or bot > pbot
+        prev_m2 = prev_m
+        # ③ MA3 必须朝上且有斜率：当根 MA3 相对前一根涨幅 ≥ BT_UP（默认 0.5%），
+        # 涨幅几乎为 0（如只涨 0.15%）视为走平，与下行一样不买
+        up_ok = prev_m2 is None or (m is not None and prev_m2 > 0
+                                    and m > prev_m2 and (m / prev_m2 - 1) >= BT_UP)
+        # 半份买入（v2.6）：正常买入没过的「中段回踩」——实体落进 MA3 的部分在 20%~45% 之间（40% 判据里那 20%~50% 的空档），
+        # 再要求①红 K（收盘 > 开盘，阴线回踩不买）②实体顶高于前一根实体顶 ③MA3 上行且幅度 ≥ 0.5%（趋势朝上明显），
+        # 命中则买半份（each/2），reason=hb，图上黄色 B；卖出/减仓当根不买，现金只要求够半份
+        hb_ok = (not sold and not half and long_on and cash >= each * 0.5
+                 and m is not None and ptop is not None and prev_m is not None
+                 and bot + BT_PENET * hgt < m <= bot + BT_HBODY * hgt
+                 and close > float(r[1]) and top > ptop
+                 and m > prev_m and (m / prev_m - 1) >= BT_UP)
+        if not (sold or half) and long_on and body_ok and lift_ok and up_ok and cash >= each:
             add = each / close
             trades.append({"date": date, "side": "buy", "price": round(close, 4),
                            "qty": round(add, 4), "amount": round(each, 2),
-                           "realized": None, "reason": "gc"})
+                           "realized": None,
+                           "reason": "gc" if gc else ("back" if (resume and not was_on) else "add")})
             cash -= each
+            cost = (cost * qty + close * add) / (qty + add)
+            qty += add
+        elif hb_ok:
+            add = each * 0.5 / close
+            trades.append({"date": date, "side": "buy", "price": round(close, 4),
+                           "qty": round(add, 4), "amount": round(each * 0.5, 2),
+                           "realized": None, "reason": "hb"})
+            cash -= each * 0.5
             cost = (cost * qty + close * add) / (qty + add)
             qty += add
         equity = cash + qty * close  # 净值 = 现金 + 持仓市值（收盘价）
@@ -841,7 +1030,7 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
     if len(rows) < 3:
         return {"error": "区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
     ind = d.get("ind") or {}
-    res = bt_run(rows, ind.get("ma3") or [], ind.get("ma5") or [], capital, each)
+    res = bt_run(rows, ind.get("ma3") or [], ind.get("ma5") or [], capital, each, _mkt_of(symbol) == "a")
     # 回测用 MA3/MA5 判信号（MA3 金叉 MA5 + 实体占上 MA3），图面另叠 MA3/MA5/MA85/MA125 四条均线供对照
     res.update({"symbol": symbol, "period": st_tf["period"], "tf": tf, "strat": st_tf["label"],
                 "klines": rows,
@@ -951,9 +1140,24 @@ async def bt_record_del(rid: int):
 async def minute(symbol: str = Query(...)):
     if symbol.startswith("us"):
         return await us_minute(symbol)
-    d = (await get_json(f"{WEB}/minute/query?code={symbol}"))["data"][symbol]
-    m = d["data"]  # {"data": ["0930 price vol amount", ...], "date": "..."}
-    return {"symbol": symbol, "quote": d.get("qt", {}).get(symbol, []), "date": m["date"], "points": m["data"]}
+    try:
+        d = (await get_json(f"{WEB}/minute/query?code={symbol}"))["data"][symbol]
+        m = d["data"]  # {"data": ["0930 price vol amount", ...], "date": "..."}
+        return {"symbol": symbol, "quote": d.get("qt", {}).get(symbol, []), "date": m["date"], "points": m["data"]}
+    except HTTPException:  # 腾讯被 WAF 挑战：降级东财分时（复用美股分时的换算口径，quote[4]=昨收供前端画基准线）
+        data = await _em_trends(_em_secid(symbol))
+        tr = (data or {}).get("trends") or []
+        if not tr:
+            raise HTTPException(502, "分时上游均不可用，请稍后刷新")
+        pts, cv, ca = [], 0.0, 0.0
+        for line in tr:
+            a = line.split(",")  # 时间,开,收,高,低,量,额,均价
+            cv += float(a[5])
+            ca += float(a[6])
+            pts.append(f"{a[0][11:13]}{a[0][14:16]} {a[2]} {cv:.0f} {ca:.3f}")
+        return {"symbol": symbol,
+                "quote": ["200", "", symbol[2:], tr[-1].split(",")[2], str(data.get("prePrice") or "")],
+                "date": tr[0][:10], "points": pts}
 
 
 @app.get("/api/search")
@@ -1344,8 +1548,8 @@ async def account_put(payload: dict, scope: str = "hist"):
 
 # ---------- 收盘前 10 分钟「买入信号」桌面提醒 ----------
 # 扫两张自选卡表（cards + cards_live）的并集，命中就弹 Windows 右下角通知。判定与回测同一套口径
-# （docs/回测规则口径.md）：今日实体（开→现价）底部在 MA3 之上，且今日箱体与前日不平行。
-# 盘中拿不到“今日收盘价”的终值，一律用实时报价现价近似，再用今开拼出今日实体；历史只取到
+# （docs/回测规则口径.md）：MA3 在 MA5 上方（金叉后、死叉前的买入区间）当日就该买；
+# 盘中拿不到“今日收盘价”的终值，一律用实时报价现价近似；历史只取到
 # 昨日为止，不依赖上游是否已出当日 K 线（腾讯日K盘中给不给当日根都能算）。
 REMIND_BEFORE = 10  # 分钟：收盘前多久开扫（同时当作窗口长度，服务中途启动也不会漏）
 REMIND_CLOSE = {"a": (15, 0), "hk": (16, 0), "us": (16, 0)}  # 各市场收市时刻（当地时区）
@@ -1425,26 +1629,14 @@ async def _signal_of(sym, mkt, q, sem):
     rows = d.get("klines") or []
     hist = [r for r in rows if r[0][:10].replace("-", "") < today]  # 只保留昨日及更早
     if len(hist) < 5:
-        return None  # 金叉要昨日的 MA3/MA5，两条均线最远用到前五根收盘，不够就不判
+        return None  # MA3/MA5 最远用到前五根收盘，不够就不判
     px = q["price"]
-    op = q["open"] or float(hist[-1][2])  # 今开缺失（集合竞价前）退化用昨收
     c1, c2, c3, c4, c5 = (float(hist[-k][2]) for k in (1, 2, 3, 4, 5))  # 昨收、前二至前五根收盘
     ma3 = (c2 + c1 + px) / 3  # 今日 MA3 = 前两日收盘 + 今日现价
     ma5 = (c4 + c3 + c2 + c1 + px) / 5  # 今日 MA5（同口径用现价代今日收盘）
-    ma3p, ma5p = (c3 + c2 + c1) / 3, (c5 + c4 + c3 + c2 + c1) / 5  # 昨日 MA3/MA5
-    if not (ma3 > ma5 and ma3p <= ma5p):
-        return None  # 3 日线没金叉 5 日线（死叉下行，或已在 MA5 上方但未再上穿）：只有箱体占上 MA3 也不提醒
-    top, bot = max(op, px), min(op, px)
-    hgt = top - bot  # 今日实体高度：给 20% 浅穿阈值用
-    ptop, pbot, phgt = bt_box(hist[-1])
-    tol = phgt * BT_PAR_TOL
-    if phgt > 0 and abs(top - ptop) <= tol and abs(bot - pbot) <= tol:
-        return None  # 两日箱体平行：回测口径里不买不卖
-    if bot <= pbot:
-        return None  # 今日实体底未高于昨日实体底（箱体底部没抬高）：不买入，与回测同一口径
-    if ma3 > bot + BT_PENET * hgt or ma3 >= top:
-        return None  # 均线侵入实体底部超过 20% 高度，或已升到实体顶之上：不提醒（与回测同一口径）
-    return {"symbol": sym, "price": px, "ma3": round(ma3, 4), "ma5": round(ma5, 4), "bot": round(bot, 4)}
+    if not ma3 > ma5:
+        return None  # 3 日线不在 5 日线上方（未金叉或已死叉）：不在买入区间，不提醒
+    return {"symbol": sym, "price": px, "ma3": round(ma3, 4), "ma5": round(ma5, 4)}
 
 
 async def _heat_of(sym, mkt, q, sem):
@@ -1459,19 +1651,13 @@ async def _heat_of(sym, mkt, q, sem):
         return None
     live = bool(q and q["price"] > 0 and q["day"] == today)
     px = q["price"] if live else float(hist[-1][2])  # 休市（美股白天等）用最后一根收盘当现价
-    op = (q["open"] if live else 0) or float(hist[-1][1]) or float(hist[-1][2])
     prev = (q["prev"] if live else 0) or float(hist[-2][2])
     c1, c2, c3, c4, c5 = (float(hist[-k][2]) for k in (1, 2, 3, 4, 5))
     ma3 = (c2 + c1 + px) / 3
     ma5 = (c4 + c3 + c2 + c1 + px) / 5
     ma3p, ma5p = (c3 + c2 + c1) / 3, (c5 + c4 + c3 + c2 + c1) / 5
     gc = ma3 > ma5 and ma3p <= ma5p
-    top, bot = max(op, px), min(op, px)
-    hgt = top - bot
-    ptop, pbot, phgt = bt_box(hist[-1])
-    tol = phgt * BT_PAR_TOL
-    par = phgt > 0 and abs(top - ptop) <= tol and abs(bot - pbot) <= tol
-    hit = bool(gc and not par and bot > pbot and ma3 <= bot + BT_PENET * hgt and ma3 < top)
+    hit = bool(ma3 > ma5)  # 提醒口径：金叉后每根都买，MA3 在 MA5 上方即命中
     return {"symbol": sym, "price": px, "pct": round((px / prev - 1) * 100, 2) if prev > 0 else 0.0,
             "ma3": round(ma3, 4), "ma5": round(ma5, 4), "gc": bool(gc), "hit": hit,
             # bull=MA3 在 MA5 上方且仍在上行（多头没坏）；休市标的 pct 是最后一根对前一根的涨跌
@@ -1539,7 +1725,7 @@ def push_hits(hits, force=False):
     flat = [h for v in hits.values() for h in v]
     if not flat:
         if force:
-            _toast("买入信号 · 无命中", "当前没有自选票满足 MA3 箱体买入条件")
+            _toast("买入信号 · 无命中", "当前没有自选票处在 MA3 上穿 MA5 后的买入区间")
         return 0
     lines = [f"{h['name'] or h['symbol']} {h['price']:.2f}" for h in flat[:4]]
     if len(flat) > 4:
