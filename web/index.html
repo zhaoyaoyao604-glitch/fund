@@ -204,6 +204,23 @@
   .zdraw.on { background: #f99502; color: #fff; }
   .err { color: var(--up); font-size: 12px; }
   .ld { color: var(--tx-4); font-size: 12px; }
+  /* 顶部固定「优异标的」一行（hist/live 两页共用）：sticky 贴视口最上，横向超出一行可滚 */
+  .sigbar { position: sticky; top: 0; z-index: 35; display: flex; align-items: center; gap: 8px; height: 28px;
+    padding: 0 12px; background: var(--bg-soft); border-bottom: var(--bd-3); font-size: 12px; color: var(--tx-2);
+    overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
+  .sigbar::-webkit-scrollbar { height: 0; }
+  .sigtag { flex: none; color: var(--amber); font-weight: 600; }
+  .sigitem { flex: none; padding: 1px 8px; border-radius: 4px; background: var(--bg-card); }
+  .sigitem em { font-style: normal; margin-left: 4px; color: var(--up); }  /* 涨幅：A 股习惯红涨 */
+  .sigitem.dn em { color: var(--dn); }
+  .sigitem.buy { background: var(--bg-accent-weak); color: var(--tx-1); box-shadow: inset 0 0 0 1px var(--bd-amber-c); }
+  .sigitem.buy b { color: var(--amber); margin-right: 4px; }
+  .sigitem.buy i { font-style: normal; color: var(--amber); margin-left: 4px; }
+  .sigsep { flex: none; width: 1px; height: 14px; background: var(--bd-1c); }
+  .sigph { flex: none; color: var(--tx-5); }
+  .sigend { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+  .sigre { border: 0; background: none; color: #f99502; cursor: pointer; font-size: 12px; }
+  .sigre[disabled] { opacity: .5; cursor: not-allowed; }
   .topbar { display: flex; justify-content: space-between; align-items: center; background: var(--bg-card); padding: 8px 12px; box-shadow: var(--sh-card); }
   .topbar .tabs button { padding: 4px 14px; }
   /* 页面级Tab（顶栏最左）：历史模拟仓 / 实时跟随仓 */
@@ -242,7 +259,7 @@
   .dp-d { border: 0; background: none; font-size: 12px; color: var(--tx-1); padding: 5px 0; border-radius: 4px;
     cursor: pointer; font-family: inherit; }
   .dp-d:hover { background: var(--bg-accent-weak); color: #f99502; }
-  .dp-d[disabled] { color: var(--tx-8); cursor: not-allowed; }  /* 周六/周日、未来日期置灰不可点 */
+  .dp-d[disabled] { color: var(--tx-8); cursor: not-allowed; }  /* 周六/周日、未来日期、早于回测可回溯起点：置灰不可点 */
   .dp-d[disabled]:hover { background: none; color: var(--tx-8); }
   .dp-d.sel, .dp-d.sel:hover { background: #f99502; color: #fff; }  /* 当前选中值 */
   .dp-d.td { box-shadow: inset 0 0 0 1px #f99502; }  /* 今天描边 */
@@ -276,6 +293,7 @@
     border-bottom: var(--bd-3); font-size: 13px; color: var(--tx-2); }
   .btcfg b { color: var(--tx-1); }
   .btcfg input { border: var(--bd-1); border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 150px; }
+  .btcfg select { background: var(--bg-field); border: var(--bd-1); border-radius: 4px; padding: 4px 6px; font-size: 12px; cursor: pointer; }
   .btrow { position: relative; display: flex; align-items: center; gap: 6px; }
   .btsym-on { border: 1px solid #f99502; background: var(--bg-accent-weak); color: #f99502; border-radius: 4px;
     font-size: 12px; padding: 3px 8px; max-width: 210px; overflow: hidden; text-overflow: ellipsis;
@@ -318,6 +336,14 @@
   .btrec { border: 1px solid #f99502; background: transparent; color: #f99502; border-radius: 4px; padding: 4px 14px;
     font-size: 13px; cursor: pointer; }
   .btrec:hover { background: var(--bg-accent-weak); }
+  /* 快捷按钮：新增=清空标的与结果重开一次；删除=删掉本次结果对应的那条回测记录
+     两者与标的卡片同处 .btcards，尺寸/圆角/字号全部继承 .btcards button（胶囊），这里只补配色与禁用态 */
+  .btcards button.btnew { margin-left: 6px; }  /* 与标的胶囊拉开一点，形成「卡片 | 操作」的分组感 */
+  .btcards button.btnew:hover { border-color: var(--bd-amber-c); color: #f99502; }
+  .btcards button.btdel:hover { border-color: #e64340; color: #e64340; }
+  .btcards button[disabled] { opacity: .45; cursor: not-allowed; }
+  .btcards button[disabled]:hover { border-color: var(--bd-2); color: var(--tx-2); background: var(--bg-field); }
+  .btgone { color: var(--tx-4); font-size: 12px; padding: 4px 0; }
   /* 回测记录弹窗：左侧竖向导航逐条列出历史回测，右侧看选中那条的票/区间/回测时间 + K线买卖点 */
   .btrmask { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,.6); display: flex;
     align-items: center; justify-content: center; }
@@ -331,17 +357,25 @@
   .btrclose:hover { background: #e64340; color: #fff; }
   .btrbody { flex: 1; min-height: 0; display: flex; }
   .btrnav { width: 272px; flex: 0 0 272px; border-right: var(--bd-3); overflow-y: auto; padding: 8px; text-align: left; }
-  .btrnavhd { font-size: 12px; color: var(--tx-5); padding: 2px 6px 8px; }
-  .btritem { display: block; width: 100%; text-align: left; border: 1px solid transparent; background: transparent;
-    color: var(--tx-2); border-radius: 6px; padding: 8px 10px; cursor: pointer; margin-bottom: 4px; font-size: 12px;
-    line-height: 1.6; }
+  /* 列表头右侧「＋ 新增」：新增=回到回测配置再跑一次（后端会再存一条快照），与条目右上角 ✕ 删除配套 */
+  .btrnavhd { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tx-5); padding: 2px 6px 8px; }
+  .btrnavhd > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btrnew { flex: 0 0 auto; border: 1px solid #f99502; background: transparent; color: #f99502; border-radius: 4px;
+    font-size: 12px; padding: 1px 8px; cursor: pointer; white-space: nowrap; }
+  .btrnew:hover { background: var(--bg-accent-weak); }
+  .btritem { position: relative; box-sizing: border-box; display: block; width: 100%; text-align: left;
+    border: 1px solid transparent; background: transparent; color: var(--tx-2); border-radius: 6px;
+    padding: 8px 10px; cursor: pointer; margin-bottom: 4px; font-size: 12px; line-height: 1.6; }  /* div 无 button 默认 border-box，不显式声明会多出 22px 横溢 */
   .btritem:hover { background: var(--bg-soft); }
   .btritem.on { background: var(--bg-accent-weak); border-color: #8a6a30; }
   .btritem b { display: block; font-size: 13px; font-weight: 600; color: var(--tx-1); margin-bottom: 2px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    padding-right: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }  /* 右侧留白给 ✕ 删除 */
   .btritem.on b { color: #f99502; }
   .btritem em { font-style: normal; color: var(--tx-5); }
   .btrpct { float: right; font-weight: 700; }
+  .btrx { position: absolute; top: 5px; right: 5px; border: 0; background: transparent; color: var(--tx-8);
+    font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 3px; cursor: pointer; }
+  .btrx:hover { background: rgba(230,67,64,.16); color: #e64340; }
   .btrdet { flex: 1; min-width: 0; overflow-y: auto; padding: 10px 16px 16px; }
   .btrinfo { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; font-size: 13px;
     color: var(--tx-2); padding-bottom: 6px; }
@@ -1348,21 +1382,27 @@ const PAGES = [["hist", "历史模拟仓"], ["live", "实时跟随仓"]];  // �
 
 // 日期选择器（历史仓）：点按钮弹出自绘日历浮层——原生 date 输入无法把特定日期置灰禁用；
 // 周六/周日、以及晚于今天的未来日期一律置灰且不可点（截止日最晚到当下），value 为空时按钮显示占位文字，
+// 可选 min（最早可选日）：传了就把更早的日期/月份/年份一律置灰且不可点，并禁止前翻超出该月（回测用行情源可回溯起点）
 // 选中日期回调 onPick("YYYY-MM-DD") 并收起；
 // 点标题「2026年9月」上翻到选月视图、再点「2026年」上翻到选年视图（‹/›：日视图翻月、月视图翻年、年视图翻12年）
-function DP({ value, onPick, title }) {
+function DP({ value, onPick, title, min }) {
   const [open, setOpen] = useState(false);
   const [vym, setVym] = useState("");       // 面板浏览中的月份 YYYY-MM（每次打开按 value/今天重置）
   const [view, setView] = useState("day");  // day=日历 / month=选月 / year=选年
   const pad2 = n => String(n).padStart(2, "0");
   const d0 = new Date(), today = `${d0.getFullYear()}-${pad2(d0.getMonth() + 1)}-${pad2(d0.getDate())}`;
-  const openCal = () => { setVym((value || today).slice(0, 7)); setView("day"); setOpen(true); };
+  const lo = min || "";  // 最早可选日（行情源可回溯起点）：空=不限；更早的日期置灰不可点
+  const openCal = () => {  // 打开时定位到 value；value 早于下限（或未选）则落在下限/今天
+    const base = value && (!lo || value >= lo) ? value : (lo || today);
+    setVym(base.slice(0, 7)); setView("day"); setOpen(true);
+  };
   const shift = delta => {  // 上一页/下一页（跨年由 Date 归一）：日视图翻1月，月视图翻1年，年视图翻12年
     const [y, m] = vym.split("-").map(Number);
     const t = view === "year" ? new Date(y + delta * 12, m - 1, 1)
       : new Date(y, m - 1 + (view === "month" ? delta * 12 : delta), 1);
     const nv = `${t.getFullYear()}-${pad2(t.getMonth() + 1)}`;
     if (nv > today.slice(0, 7)) return;  // 未来月份/年份不再后翻：截止日不得晚于今天
+    if (lo && nv < lo.slice(0, 7)) return;  // 早于可回溯起点的月份/年份不再前翻
     setVym(nv);
   };
   let panel = null;
@@ -1374,8 +1414,9 @@ function DP({ value, onPick, title }) {
       body = html`<div className="dp-ym">
         ${Array.from({ length: 12 }, (_, i) => { const yy = y - 5 + i;
           const fut = String(yy) > today.slice(0, 4);  // 未来年份：禁用置灰
+          const past = !!lo && String(yy) < lo.slice(0, 4);  // 早于可回溯起点：禁用置灰
           const cls = "dp-d" + (String(yy) === value.slice(0, 4) ? " sel" : "") + (String(yy) === today.slice(0, 4) ? " td" : "");
-          return html`<button key=${yy} className=${cls} disabled=${fut}
+          return html`<button key=${yy} className=${cls} disabled=${fut || past}
             onClick=${() => { setVym(`${yy}-${pad2(m)}`); setView("month"); }}>${yy}</button>`; })}
       </div>`;
     } else if (view === "month") {  // 选月：点某月回日历视图
@@ -1383,8 +1424,9 @@ function DP({ value, onPick, title }) {
       body = html`<div className="dp-ym">
         ${Array.from({ length: 12 }, (_, i) => { const ym = `${y}-${pad2(i + 1)}`;
           const fut = ym > today.slice(0, 7);  // 未来月份：禁用置灰
+          const past = !!lo && ym < lo.slice(0, 7);  // 早于可回溯起点的月份：禁用置灰
           const cls = "dp-d" + (ym === value.slice(0, 7) ? " sel" : "") + (ym === today.slice(0, 7) ? " td" : "");
-          return html`<button key=${ym} className=${cls} disabled=${fut}
+          return html`<button key=${ym} className=${cls} disabled=${fut || past}
             onClick=${() => { setVym(ym); setView("day"); }}>${i + 1}月</button>`; })}
       </div>`;
     } else {  // 日历：周六/周日置灰且不可点
@@ -1399,8 +1441,9 @@ function DP({ value, onPick, title }) {
             const ds = `${y}-${pad2(m)}-${pad2(i + 1)}`;
             const wk = (first + i) % 7 >= 5;  // 周六/周日：禁用置灰
             const fut = ds > today;            // 未来日期：禁用置灰（截止日最晚到当下）
+            const past = !!lo && ds < lo;      // 早于可回溯起点：禁用置灰
             const cls = "dp-d" + (ds === value ? " sel" : "") + (ds === today ? " td" : "");
-            return html`<button key=${ds} className=${cls} disabled=${wk || fut}
+            return html`<button key=${ds} className=${cls} disabled=${wk || fut || past}
               onClick=${() => { onPick(ds); setOpen(false); }}>${i + 1}</button>`;
           })}
         </div>
@@ -1909,7 +1952,7 @@ function LiveApp({ page, setPage, dstart, setDstart, theme, setTheme }) {
         <${DPLive} value=${dend} onPick=${v => setDend(v)} title="结束日期" />
         ${(dstart || dend !== todayLive()) && html`<button className="clr-live" onClick=${() => { setDstart(""); setDend(todayLive()); }}>清除</button>`}
       </span>
-     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn-live" + (showBt ? " on-live" : "")} title="回测：选一只标的与区间，按日K回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn-live" + (showBt ? " on-live" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
       <span className="search-live">
         个股：
         <input value=${q} placeholder="请输入名称/代码"
@@ -1941,10 +1984,13 @@ function ThemeSwitch({ theme, setTheme }) {
   </span>`;
 }
 
-// ---------- 回测弹窗（hist/live 两视图共用同一个浮层：只吃日K与资金参数，与 scope 无关）----------
-// 交互：选一只标的（下拉搜索 / 点自选卡快捷选）+ 选回测区间 → 取日K算收益曲线。
+// ---------- 回测弹窗（hist/live 两视图共用同一个浮层：只吃K线周期与资金参数，与 scope 无关）----------
+// 交互：选一只标的（下拉搜索 / 点自选卡快捷选）+ 选策略类型与回测区间 → 取对应周期K线算收益曲线。
 // 回测规则全部集中在 btCalc() 里；后续口径（定投/止盈/手续费/仓位等）只改它，弹窗与画图不用动。
 const BT_TERMS = [["近半年", 182], ["近1年", 365], ["近3年", 1095]];  // 快捷区间：按自然日回溯
+// 策略类型（后端 BT_STRATS 同款）：共用同一套箱体 + MA3 金叉 MA5 规则，只是取数周期不同
+//   day = 日k占Ma3（默认）  m60 = 1小时k占Ma3（每根 1 小时，A股一天 4 根）
+const BT_STRATS = [["day", "日k占Ma3"], ["m60", "1小时k占Ma3"]];
 
 function btDay(off) {  // 今天/往前 off 天的 YYYY-MM-DD
   const d = new Date();
@@ -1952,13 +1998,22 @@ function btDay(off) {  // 今天/往前 off 天的 YYYY-MM-DD
   const p = n => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+// K线时间有两种写法：日K 是 "2025-12-25"，分钟K 是 14 位紧凑串 "202512251130"（无分隔符）
+// 统一取成 YYYY-MM-DD（直接 slice(0,10) 会把分钟K 截成 "2025122511"），供日期控件与区间比较
+function btDateOf(v) {
+  const t = String(v || "");
+  return /^\d{12,}$/.test(t) ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` : t.slice(0, 10);
+}
 
 // 回测结果图（口径见 docs/回测规则口径.md）：区间日K + MA3 + 买卖点。
 // 买入点标在当日最低价下方、卖出点标在最高价上方（红买绿卖），鼠标悬停可看该笔价格/数量/本笔盈亏。
 function btKOpt(d) {
   const P = chartPal();
   const rows = d.klines || [];
-  const cats = rows.map(r => String(r[0]).slice(0, 10));
+  // 时间标签：日K 到日（2026-10-28），1 小时K 到分钟（2026-10-28 10:30）——后端已统一格式化，
+  // 这里只负责取到正确长度，否则同日多根分钟K会挤在同一个类目上
+  const cat0 = v => { const s = String(v); return s.length > 10 ? s.slice(0, 16) : s; };
+  const cats = rows.map(r => cat0(r[0]));
   const k = rows.map(r => [+r[1], +r[2], +r[4], +r[3]]);  // o,c,l,h
   const ind = d.ind || {};  // 信号判定仍只用 MA3，四条均线仅作图面对照
   // 图面叠四条均线：MA3/MA5/MA85/MA125（长均线靠后端预热段才在区间首根就有值）
@@ -1973,6 +2028,10 @@ function btKOpt(d) {
   }));
   if (!(hi > lo)) { lo *= 0.999; hi = hi * 1.001 || 1; }
   const pad = (hi - lo) * 0.06;  // 标记离K线留点空，免压住影线
+  // Y 轴必须比 K 线极值再各放宽 1.8 个 pad：买卖点本身画在「最高价+pad / 最低价-pad」，
+  // 若轴范围只取 K 线极值，落在区间最高价/最低价那一根的标记会落到坐标系外被 ECharts 直接裁掉
+  // （如 9-30 卖出价 1.238，当日高 1.241 就是区间最高，S 一直看不见）。
+  const yMin = lo - pad * 1.8, yMax = hi + pad * 1.8;
   const pts = side => trades.filter(t => t.side === side).map(t => {
     const i = cats.indexOf(t.date);
     const r = rows[i] || [];
@@ -1996,13 +2055,13 @@ function btKOpt(d) {
     backgroundColor: "transparent",
     tooltip: { trigger: "axis", backgroundColor: cssVar("--bg-card"), borderColor: cssVar("--bd-field"),
       textStyle: { color: cssVar("--tx-1"), fontSize: 12 }, axisPointer: { type: "cross" }, formatter: tip },
-    grid: { left: 54, right: 58, top: 26, bottom: 46 },
+    grid: { left: 54, right: 58, top: 30, bottom: 46 },
     legend: { show: true, top: 0, left: 64, itemWidth: 14, itemHeight: 8, itemGap: 14,
       data: ["MA3", "MA5", "MA85", "MA125", "买", "卖"],  // 不列 K 线，省空间
       textStyle: { color: cssVar("--tx-4"), fontSize: 11 } },
     xAxis: { type: "category", data: cats, boundaryGap: true, axisLine: { lineStyle: { color: cssVar("--bd-field") } },
       axisLabel: { color: cssVar("--tx-4"), fontSize: 11, hideOverlap: true } },
-    yAxis: { scale: true, min: lo, max: hi, splitLine: { lineStyle: { color: cssVar("--bg-soft2") } },
+    yAxis: { scale: true, min: yMin, max: yMax, splitLine: { lineStyle: { color: cssVar("--bg-soft2") } },
       axisLabel: { color: cssVar("--tx-4"), fontSize: 11 } },
     dataZoom: [
       { type: "inside", start: 0, end: 100 },
@@ -2016,12 +2075,12 @@ function btKOpt(d) {
         itemStyle: { color: P.up, color0: P.dn, borderColor: P.up, borderColor0: P.dn } },
       ...mas.map(m => ({ name: m.name, type: "line", data: m.data, showSymbol: false,
         lineStyle: { width: 1, color: m.color } })),
-      { name: "买", type: "scatter", data: pts("buy"), symbol: "triangle", symbolSize: 11,
+      { name: "买", type: "scatter", data: pts("buy"), symbol: "triangle", symbolSize: 12,
         itemStyle: { color: P.up }, z: 5,
-        label: { show: true, position: "bottom", formatter: "B", color: P.up, fontSize: 10, fontWeight: 700 } },
-      { name: "卖", type: "scatter", data: pts("sell"), symbol: "triangle", symbolRotate: 180, symbolSize: 11,
+        label: { show: true, position: "bottom", formatter: "B", color: P.up, fontSize: 11, fontWeight: 700 } },
+      { name: "卖", type: "scatter", data: pts("sell"), symbol: "triangle", symbolRotate: 180, symbolSize: 12,
         itemStyle: { color: P.dn }, z: 5,
-        label: { show: true, position: "top", formatter: "S", color: P.dn, fontSize: 10, fontWeight: 700 } },
+        label: { show: true, position: "top", formatter: "S", color: P.dn, fontSize: 11, fontWeight: 700 } },
     ],
   };
 }
@@ -2088,7 +2147,8 @@ function btCalcHold(rows) {
 // ---------- 回测记录（左导航 + 右详情）----------
 // 后端每次 /api/backtest 成功都会自动存一份快照（backtests 表）；这里左边竖着列历史回测，
 // 右边看选中那条的票、区间、回测时间与「K线 + 买卖点」，图直接复用 btKOpt，口径跟回测弹窗完全一致。
-function BtHistory({ onClose, theme }) {
+// 列表头「＋ 新增」回到回测配置再跑一次（后端会再存一条）；每条右上角 ✕ 直接删这条，右侧详情的「删除这条」同义。
+function BtHistory({ onClose, theme, onNew }) {
   const [items, setItems] = useState(null);   // null=列表加载中；[]=暂无记录
   const [cur, setCur] = useState(null);       // 选中记录 id
   const [rec, setRec] = useState(null);       // 选中记录详情 {id,name,symbol,start,end,created,data}
@@ -2149,23 +2209,28 @@ function BtHistory({ onClose, theme }) {
       </div>
       <div className="btrbody">
         <div className="btrnav">
-          <div className="btrnavhd">${items ? `共 ${items.length} 条` : "加载中…"}${items && items.length ? "（新的在最上）" : ""}</div>
-          ${(items || []).map(it => html`<button key=${it.id} className=${"btritem" + (it.id === cur ? " on" : "")}
+          <div className="btrnavhd">
+            <span title=${items && items.length ? "新的在最上" : ""}>${items ? `共 ${items.length} 条` : "加载中…"}</span>
+            ${onNew && html`<button className="btrnew" title="新增一次回测：回到回测配置，选好标的与区间后点「开始回测」" onClick=${onNew}>＋ 新增</button>`}
+          </div>
+          ${(items || []).map(it => html`<div key=${it.id} className=${`btritem${it.id === cur ? " on" : ""}`}
             onClick=${() => setCur(it.id)}>
+            <button className="btrx" title="删除这条回测记录" onClick=${ev => del(ev, it.id)}>✕</button>
             <b>${it.name} <em>${it.symbol}</em></b>
             <span>${it.start} ~ ${it.end}
               <span className="btrpct" style=${{ color: (it.stats.total || 0) >= 0 ? "var(--up)" : "var(--dn)" }}>${sg(it.stats.total)}%</span>
             </span>
-            <span><em>回测于 ${it.created}</em></span>
-          </button>`)}
+            <span><em>${it.strat || "日k占Ma3"} · 回测于 ${it.created}</em></span>
+          </div>`)}
         </div>
         <div className="btrdet">
           ${err && html`<div className="bterr">${err}</div>`}
-          ${!err && items && items.length === 0 && html`<div className="btph">还没有回测记录：关掉这里点「开始回测」跑一次，就会自动记一条</div>`}
+          ${!err && items && items.length === 0 && html`<div className="btph">还没有回测记录：点左侧「＋ 新增」或关掉这里点「开始回测」跑一次，就会自动记一条</div>`}
           ${!rec && !err && items && items.length > 0 && html`<div className="btph">读取记录中…</div>`}
           ${rec && html`<div>
             <div className="btrinfo">
               <span className="btrtitle">${rec.name} <span style=${{ opacity: .5, fontSize: 12, fontWeight: 400 }}>${rec.symbol}</span></span>
+              <span>策略<b>${rec.strat || "日k占Ma3"}</b></span>
               <span>区间<b>${st.first || rec.start} ~ ${st.last || rec.end}</b></span>
               <span>回测时间<b>${rec.created}</b></span>
               <span>本金<b>${rec.capital}</b></span>
@@ -2183,7 +2248,7 @@ function BtHistory({ onClose, theme }) {
               ${busy && html`<span style=${{ color: "var(--tx-5)" }}>读取中…</span>`}
             </div>
             <div className="btrchart" ref=${refK}></div>
-            <div className="btrule">图上 B=买入、S=卖出；均线与成交口径同「回测」弹窗：箱体=开→收实体，MA3 低于实体底且实体底高于前日实体底才买；跌破前日箱体、箱体顶部未高于前日顶部、或实体一半落进 MA3 则清仓，按收盘价成交、不计手续费。</div>
+            <div className="btrule">图上 B=买入、S=卖出；均线与成交口径同「回测」弹窗：箱体=开→收实体（日K 按日、1小时K 按每根 60 分钟），MA3 金叉上穿 MA5（由不高于 MA5 转为高于 MA5）且不高于实体底 + 20% 实体高度（实体至少 80% 站上均线）、实体底高于前一根实体底才买（MA3 死叉下行时仅凭箱体占上 MA3 也不买）；跌破前一根箱体、箱体顶部未高于前一根顶部、或实体一半落进 MA3 则清仓，按收盘价成交、不计手续费。</div>
           </div>`}
         </div>
       </div>
@@ -2199,9 +2264,12 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
   const [e, setE] = useState(defEnd || "");     // 回测结束日期
   const [capital, setCapital] = useState("100000");  // 回测本金
   const [each, setEach] = useState("10000");          // 单次买入金额
+  const [strat, setStrat] = useState("day");           // 策略类型：day=日k占Ma3（默认）/ m60=1小时k占Ma3
+  const [minD, setMinD] = useState("");          // 当前标的+策略下行情源能回溯到的最早交易日（空=不限）；比它早的日期一律不可选
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [res, setRes] = useState(null);          // {sym, data, warn}；data 为 /api/backtest 全量返回
+  const [recGone, setRecGone] = useState(false); // 本次结果对应的回测记录是否已被快捷「删除」删掉
   const [showRec, setShowRec] = useState(false); // 回测记录弹窗（盖在回测弹窗之上）
   const refK = useRef(null);                     // K线图容器（带买卖点）
   const refNav = useRef(null);                   // 资金曲线容器
@@ -2223,6 +2291,25 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
     }, 300);
     return () => clearTimeout(t);
   }, [q]);
+  useEffect(() => {  // 换标的/换策略就探一次「最早能回测到哪天」：日K 单次约 800 根（≈3年）；1小时K 受上游分钟K 单次 800 根限制只有约 200 个交易日
+    const sym0 = sym && sym.symbol;
+    if (!sym0) { setMinD(""); return; }
+    let dead = false;
+    (async () => {
+      try {
+        // 借 /api/kline 带 start/end 取该周期全量窗口（后端内部已卡上游单次上限），首根日期即可回测起点
+        const d = await getJSON(`/api/kline?symbol=${sym0}&period=${strat}&limit=676&start=1990-01-01&end=${btDay(0)}`);
+        const k0 = (d.klines || [])[0];
+        if (!dead) setMinD(k0 ? btDateOf(k0[0]) : "");
+      } catch (e2) { if (!dead) setMinD(""); console.warn("回测可回溯起点探测失败", e2); }
+    })();
+    return () => { dead = true; };
+  }, [sym && sym.symbol, strat]);
+  useEffect(() => {  // 探测到下限后修正区间：整体早于下限就把区间平移到「下限~今天」，否则只把越界的那一端拉回下限（日期控件已置灰不可点，这里兜住快捷区间与换策略前的旧值）
+    if (!minD) return;
+    if (e && e < minD) { setS(minD); setE(btDay(0)); return; }
+    if (s && s < minD) setS(minD);
+  }, [minD]);
   useEffect(() => {  // 结果就绪后画两张图：区间日K（带买卖点）+ 资金曲线（容器随结果渲染才存在，故依赖 res）
     if (!res) return;
     const charts = [];
@@ -2242,6 +2329,7 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
   const run = async () => {
     if (!sym) { setErr("请先选择回测标的"); return; }
     if (s && e && s > e) { setErr("开始日期不能晚于结束日期"); return; }
+    if (minD && s && s < minD) { setErr(`该策略行情源最早只能到 ${minD}，开始日期不能再早`); return; }
     const cap = parseFloat(capital), ea = parseFloat(each);
     if (!(cap > 0)) { setErr("本金需大于 0"); return; }
     if (!(ea > 0)) { setErr("单次买入金额需大于 0"); return; }
@@ -2249,21 +2337,37 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
     try {
       // 规则全部落在后端 /api/backtest（与实盘流水完全隔离），前端只管取回来画图
       const dr = `${s ? `&start=${s}` : ""}${e ? `&end=${e}` : ""}`;
-      // name 一并传给后端，存进回测记录（记录列表显示名称而不是只有代码）
-      const d = await getJSON(`/api/backtest?symbol=${sym.symbol}&name=${encodeURIComponent(sym.name)}&capital=${cap}&each=${ea}${dr}`);
+      // name 一并传给后端，存进回测记录（记录列表显示名称而不是只有代码）；tf 选策略类型
+      const d = await getJSON(`/api/backtest?symbol=${sym.symbol}&name=${encodeURIComponent(sym.name)}&capital=${cap}&each=${ea}&tf=${strat}${dr}`);
       const rows = d.klines || [];
-      if (rows.length < 2) throw new Error("区间内交易日不足（落在周末/停牌或超出行情源可回溯范围），请换个区间");
-      setRes({
-        sym, data: d,
-        // 日K源单次约取 800 根（约3年）：请求起点更早时实际起点被截断，明确告知用户
-        warn: s && String(rows[0][0]).slice(0, 10) > s ? `行情源只回溯到 ${String(rows[0][0]).slice(0, 10)}，实际回测起点按该日算` : "",
-      });
+      if (rows.length < 2) throw new Error("区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间");
+      // 数据被截断的提示：日K 单次约 800 根（≈3年）；1 小时K 上游单次只给约 800 根（≈200 个交易日）
+      const first = String(rows[0][0]).slice(0, 10);
+      const w = [];
+      // 起点已在下限之内（不可选范围已拦住）还比 start 晚，只可能是起始日非交易日，别再误报成「行情源回溯不到」
+      if (s && first > s) w.push(minD && s >= minD
+        ? `${s} 非交易日，区间首个交易日为 ${first}，实际回测起点按该日算`
+        : `行情源只回溯到 ${first}，实际回测起点按该日算`);
+      if (strat === "m60" && rows.length >= 780) w.push("1小时K 上游单次最多约 800 根（≈200 个交易日），更早的历史取不到");
+      setRes({ sym, data: d, warn: w.join("；") });
+      setRecGone(false);
     } catch (e2) { setErr(String(e2.message || e2)); }
     finally { setBusy(false); }
   };
   const sg = v => `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
   const st = res ? res.data.stats : null;   // 指标汇总
   const trades = res ? res.data.trades || [] : [];
+  const isMin = !!(res && res.data.tf === "m60");  // 1小时K 策略：文案里「日」要说成「根」
+  const recId = res && res.data.rec ? res.data.rec.id : null;  // 本次结果落库的记录 id（落库失败时为 null）
+  const newBt = () => {  // 快捷新增：只清标的与上次结果，区间/本金/策略沿用，选好标的再点「开始回测」即新增一条
+    setSym(null); setQ(""); setItems([]); setRes(null); setErr(""); setRecGone(false); setMinD("");
+  };
+  const delRec = async () => {  // 快捷删除：只删本次结果对应的那条记录，图仍留在页上（避免误删后还要重跑）
+    if (!recId) { setErr("当前没有可删的记录：这次回测未落库，可去「回测记录」删历史记录"); return; }
+    if (!window.confirm("删掉这次回测的记录？结果图仍保留，只是记录列表里不再有这条")) return;
+    try { await sendJSON(`/api/backtests/${recId}`, "DELETE"); setRecGone(true); }
+    catch (e2) { setErr(String(e2.message || e2)); }
+  };
   return html`<div className="btmask" onClick=${onClose}>
     <div className="btpanel" onClick=${ev => ev.stopPropagation()}>
       <div className="bthd">
@@ -2282,12 +2386,14 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
           </div>`}
         </span>
         <span className="btrow">区间：
-          <${DP} value=${s} onPick=${v => setS(v)} title="开始日期" />
+          <${DP} value=${s} onPick=${v => setS(v)} min=${minD} title="开始日期" />
           →
-          <${DP} value=${e} onPick=${v => setE(v)} title="结束日期" />
+          <${DP} value=${e} onPick=${v => setE(v)} min=${minD} title="结束日期" />
           <span className="btquick">
-            ${BT_TERMS.map(([t, n]) => html`<button key=${t} onClick=${() => { setS(btDay(n)); setE(btDay(0)); }}>${t}</button>`)}
+            ${BT_TERMS.map(([t, n]) => html`<button key=${t} onClick=${() => { const a = btDay(n); setS(minD && a < minD ? minD : a); setE(btDay(0)); }}>${t}</button>`)}
           </span>
+          ${minD && html`<span style=${{ fontSize: 12, opacity: .55 }}
+            title=${`行情源限制：${strat === "m60" ? "1小时K 上游单次最多约 800 根（≈200 个交易日）" : "日K 单次最多约 800 根（≈3年）"}，更早的历史取不到`}>可回溯到 ${minD}</span>`}
         </span>
         <span className="btrow">本金：
           <input value=${capital} onChange=${ev => setCapital(ev.target.value)} style=${{ width: 90 }} />
@@ -2295,20 +2401,32 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
         <span className="btrow">每次买入：
           <input value=${each} onChange=${ev => setEach(ev.target.value)} style=${{ width: 90 }} />
         </span>
+        <span className="btrow" title="策略类型：日K 与 1小时K 用同一套箱体 + MA3 金叉 MA5 规则，只是 K 线周期不同">
+          策略：
+          <select value=${strat} onChange=${ev => setStrat(ev.target.value)}>
+            ${BT_STRATS.map(([k, t]) => html`<option key=${k} value=${k}>${t}</option>`)}
+          </select>
+        </span>
         <button className="btgo" disabled=${busy} onClick=${run}>${busy ? "回测中…" : "开始回测"}</button>
         <button className="btrec" onClick=${() => setShowRec(true)}>回测记录</button>
       </div>
       <div className="btbody">
-        ${cards.length > 0 && html`<div className="btcards">
+        <div className="btcards">
           ${cards.map(c => html`<button key=${c.symbol} className=${sym && sym.symbol === c.symbol ? "on" : ""}
             title=${c.symbol} onClick=${() => pick(c)}>${c.name}</button>`)}
-        </div>`}
+          <button className="btnew" disabled=${busy} title="新增：清空标的与结果，重新选一只跑一次" onClick=${newBt}>＋ 新增</button>
+          <button className="btdel" disabled=${busy || !recId || recGone}
+            title=${recGone ? "这次回测的记录已删除" : (recId ? `删除本次回测记录（id ${recId}），结果图仍保留` : "还没有可删的记录：先跑一次回测")}
+            onClick=${delRec}>删除</button>
+        </div>
         ${err && html`<div className="bterr">${err}</div>`}
+        ${recGone && html`<div className="btgone">本次回测记录已删除（结果图仍保留；重新点「开始回测」会再存一条）</div>`}
         ${!res && !err && html`<div className="btph">选好标的与区间后点「开始回测」</div>`}
         ${res && html`<div>
           ${res.warn && html`<div className="btwarn">${res.warn}</div>`}
           <div className="btstat">
             <span>${res.sym.name} <span style=${{ opacity: .5, fontSize: 12 }}>${res.sym.symbol}</span></span>
+            <span>策略<b>${res.data.strat || (BT_STRATS.find(x => x[0] === strat) || [])[1] || "日k占Ma3"}</b></span>
             <span>累计收益<b className=${st.total >= 0 ? "up" : "dn"}>${sg(st.total)}%</b></span>
             <span>期末资金<b className=${st.total >= 0 ? "up" : "dn"}>${st.end.toFixed(2)}</b></span>
             ${st.ann != null && html`<span>年化<b className=${st.ann >= 0 ? "up" : "dn"}>${sg(st.ann)}%</b></span>`}
@@ -2332,16 +2450,19 @@ function Backtest({ cards, defStart, defEnd, onClose, theme }) {
               <span>${t.qty}</span>
               <span>${t.amount}</span>
               <span className=${t.realized == null ? "" : (t.realized >= 0 ? "up" : "dn")}>${t.realized == null ? "—" : sg(t.realized)}</span>
-              <span className="btrs">${t.side === "buy" ? "MA3 在实体下方" : (t.reason === "broke" ? "跌破前日箱体" : (t.reason === "ntop" ? "箱体顶部未抬高" : "实体一半落进 MA3"))}</span>
+              <span className="btrs">${t.side === "buy" ? "MA3 金叉 MA5 + 实体≥80% 站上 MA3" : (t.reason === "broke" ? (isMin ? "跌破前一根箱体" : "跌破前日箱体") : (t.reason === "ntop" ? "箱体顶部未抬高" : "实体一半落进 MA3"))}</span>
             </div>`)}
           </div>`}
           <div className="btnavhd">资金曲线（现金 + 持仓市值）</div>
           <div className="btnavchart" ref=${refNav}></div>
-          <div className="btrule">口径：箱体=当日开→收实体；3 日线低于实体底部、且实体底部高于前一日实体底部才买（每次 ${each || "10000"} 元）；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体、箱体顶部未高于前日顶部或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。</div>
+          <div className="btrule">口径：${isMin
+            ? `箱体=当根 60 分钟K 的开→收实体；3 根均线金叉 5 根均线（MA3 由不高于 MA5 转为高于 MA5）且 MA3 不高于实体底 + 20% 实体高度、实体底高于前一根实体底才买（每次 ${each || "10000"} 元），MA3 死叉下行时仅凭箱体占上 MA3 也不买；相邻两根顶对顶、底对底偏差 ≤ 前一根实体高度 20% 算平行，当根不动；跌破前一根箱体、箱体顶部未高于前一根顶部或实体一半落进 3 根均线则清仓；按当根收盘价成交、不计手续费。`
+            : `箱体=当日开→收实体；3 日线金叉 5 日线（MA3 由不高于 MA5 转为高于 MA5）且 MA3 不高于实体底 + 20% 实体高度、实体底高于前一日实体底才买（每次 ${each || "10000"} 元），MA3 死叉下行时仅凭箱体占上 MA3 也不买；两日顶对顶、底对底偏差 ≤ 前日实体高度 20% 算平行，当日不动；跌破前日箱体、箱体顶部未高于前日顶部或实体一半落进 3 日线则清仓；按收盘价成交、不计手续费。`}</div>
         </div>`}
       </div>
     </div>
-    ${showRec && html`<${BtHistory} onClose=${() => setShowRec(false)} theme=${theme} />`}
+    ${showRec && html`<${BtHistory} onClose=${() => setShowRec(false)} theme=${theme}
+      onNew=${() => { setShowRec(false); setRes(null); setErr(""); setQ(""); setItems([]); }} />`}
   </div>`;
 }
 
@@ -2513,7 +2634,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, them
         <${DP} value=${dend} onPick=${v => setEnd(v)} title="结束日期" />
         ${(dstart || dend) && html`<button className="clr" onClick=${() => setDates("", "")}>清除</button>`}
       </span>
-     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn" + (showBt ? " on" : "")} title="回测：选一只标的与区间，按日K回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn" + (showBt ? " on" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button></span>
       <span className="search">
         个股：
         <input value=${q} placeholder="请输入名称/代码"
@@ -2534,6 +2655,43 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, them
         index=${i} onDragStart=${setDragIdx} onDropCard=${moveCard} onDelete=${removeCard}
         dstart=${dstart} dend=${dend} quote=${quotes[c.symbol]} holding=${holdings[c.symbol]} onTrade=${onTrade} theme=${theme} />`) }
     </div>
+  </div>`;
+}
+
+// 顶部固定条：一行看完「今天哪些标的优异」——左边红色高亮=命中买入口径（可买），
+// 右边=多头未走坏且今日上涨的；每 60 秒自动重扫，也可点「刷新」立刻扫
+function SignalBar() {
+  const [d, setD] = useState(null);   // /api/heat 返回：{items, at}
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setBusy(true);
+    try { setD(await getJSON("/api/heat")); }
+    catch (e) { console.warn("优异标的扫描失败", e); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => {  // 挂着就每 60 秒静默刷新一次（39 只并发 3 拉日K，约 6 秒，不打断操作）
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, []);
+  const items = (d && d.items) || [];
+  const hits = items.filter(it => it.hit).sort((a, b) => b.pct - a.pct);
+  const best = items.filter(it => !it.hit && it.bull && it.pct > 0).sort((a, b) => b.pct - a.pct).slice(0, 8);
+  const pc = v => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+  return html`<div className="sigbar">
+    <span className="sigtag">信号</span>
+    ${!d && html`<span className="sigph">扫描中…</span>`}
+    ${d && hits.length === 0 && html`<span className="sigph">今日无买点</span>`}
+    ${hits.map(it => html`<span key=${it.symbol} className=${"sigitem buy" + (it.pct < 0 ? " dn" : "")}
+      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 上穿 MA5 ${it.ma5} · 箱体底抬高 · ${it.live ? "盘中价" : "休市按最后收盘"}`}>
+      <b>●</b>${it.name || it.symbol}<em>${pc(it.pct)}</em><i>可买</i></span>`)}
+    ${hits.length > 0 && best.length > 0 && html`<span className="sigsep"></span>`}
+    ${best.map(it => html`<span key=${it.symbol} className="sigitem"
+      title=${`${it.name} ${it.symbol} · MA3 ${it.ma3} 在 MA5 ${it.ma5} 上方且仍上行`}>${it.name || it.symbol}<em>${pc(it.pct)}</em></span>`)}
+    <span className="sigend">
+      <span className="sigph">${d ? `更新 ${d.at}` : ""}</span>
+      <button className="sigre" title="立刻重扫一遍" disabled=${busy} onClick=${load}>${busy ? "扫描中…" : "刷新"}</button>
+    </span>
   </div>`;
 }
 
@@ -2599,9 +2757,13 @@ function App() {
   const setDates = (s, e) => { setHd({ s, e }); put({ hist_dstart: s, hist_dend: e }); };  // 仅「清除」用：两键同时清空
   const setLiveStart = v => { setLs(v); put({ live_dstart: v }); };
   if (!booted) return html`<div></div>`;
-  return page === "hist"
-    ? html`<${HistApp} page=${page} setPage=${setPage} dstart=${hd.s} dend=${hd.e} setStart=${setStart} setEnd=${setEnd} setDates=${setDates} theme=${theme} setTheme=${setTheme} />`
-    : html`<${LiveApp} page=${page} setPage=${setPage} dstart=${ls} setDstart=${setLiveStart} theme=${theme} setTheme=${setTheme} />`;
+  // 顶部固定条放在两页之外：切历史仓/实时仓都不重建，省掉每切一次重扫 39 只
+  return html`<${React.Fragment}>
+    <${SignalBar} />
+    ${page === "hist"
+      ? html`<${HistApp} page=${page} setPage=${setPage} dstart=${hd.s} dend=${hd.e} setStart=${setStart} setEnd=${setEnd} setDates=${setDates} theme=${theme} setTheme=${setTheme} />`
+      : html`<${LiveApp} page=${page} setPage=${setPage} dstart=${ls} setDstart=${setLiveStart} theme=${theme} setTheme=${setTheme} />`}
+  <//>`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

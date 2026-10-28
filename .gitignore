@@ -4,6 +4,7 @@ __pycache__/
 
 # 运行时产物（本地数据库 / 进程文件）
 server/cards.db*
+/cards.db
 *.pid
 *.log
 
@@ -14,5 +15,9 @@ _probe/
 *.png
 *.bak
 
-# 本地开发工具（便携 Git 等）
+# 本地开发工具（便携 Git、Python 虚拟环境等）
 .tools/
+.venv/
+
+# 本地临时运维脚本（Qoder 重启/代理修复等）
+.qoder_restart.sh

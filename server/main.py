@@ -21,7 +21,10 @@ from fastapi.staticfiles import StaticFiles
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 # ifzq 双域：web. 与裸域内容一致，谁被 WAF 挑战就切另一个（pref 记住当前可用域）
 IFZQ_HOSTS = ("web.ifzq.gtimg.cn", "ifzq.gtimg.cn")
-_ifzq_pref = {"i": 0}
+# 第三通道：腾讯网页端 proxy.finance.qq.com/ifzqgtimg。它与 ifzq 共用同一套行情数据，但 WAF 规则独立：
+# ifzq 两个域同时返回 501 JS 挑战页时它通常仍可用，返回结构与 fqkline/mkline 完全一致，路径前缀加 /ifzqgtimg 即可
+PROXY_HOST = "proxy.finance.qq.com"
+_chan = {"i": 0}  # 上次取数成功的通道下标（0/1=ifzq 双域，2=proxy）：命中后优先复用，避免每轮先撞已失效的通道
 WEB = "https://web.ifzq.gtimg.cn/appstock/app"  # minute（分时）
 BARE = "https://web.ifzq.gtimg.cn/appstock/app"  # fqkline（日/周/月K） / mkline（分钟K）
 EM_SUGGEST = "https://searchapi.eastmoney.com/api/suggest/get"  # 东财搜索
@@ -133,8 +136,14 @@ def _init_db():
         with con:
             con.execute("CREATE TABLE backtests (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
                         "name TEXT NOT NULL, start TEXT NOT NULL DEFAULT '', end TEXT NOT NULL DEFAULT '', "
-                        "capital REAL NOT NULL, each REAL NOT NULL, created TEXT NOT NULL, payload TEXT NOT NULL)")
-            con.execute("CREATE INDEX idx_backtests_key ON backtests (symbol, start, end, capital, each)")
+                        "capital REAL NOT NULL, each REAL NOT NULL, tf TEXT NOT NULL DEFAULT 'day', "
+                        "created TEXT NOT NULL, payload TEXT NOT NULL)")
+            con.execute("CREATE INDEX idx_backtests_key ON backtests (symbol, start, end, capital, each, tf)")
+    else:
+        # 老库补列：tf=策略类型（day=日k占Ma3 / m60=1小时k占Ma3），历史记录一律回填 day
+        if "tf" not in [r[1] for r in con.execute("PRAGMA table_info(backtests)").fetchall()]:
+            with con:
+                con.execute("ALTER TABLE backtests ADD COLUMN tf TEXT NOT NULL DEFAULT 'day'")
     con.close()
 
 
@@ -336,9 +345,15 @@ _CACHE = {}
 TTL = 30  # 秒：同 URL 30 秒内走内存。防止刷新页面 37 卡并发连击上游触发腾讯 WAF 风控
 
 
-def _swap_host(url, host):
+def _ifzq_urls(url):
+    # 候选通道（上次成功的排最前，其余按序兜底）：ifzq 双域是同一套 WAF 策略，会同时被 501 挑战，
+    # 故需要 proxy.finance 这条独立通路的兜底，否则一个接口被挑战就整屏 K 线全空
     p = urlsplit(url)
-    return urlunsplit((p.scheme, host, p.path, p.query, p.fragment))
+    cands = [urlunsplit((p.scheme, h, p.path, p.query, p.fragment)) for h in IFZQ_HOSTS]
+    if p.path.startswith("/appstock/app/"):
+        cands.append(urlunsplit(("https", PROXY_HOST, "/ifzqgtimg" + p.path, p.query, p.fragment)))
+    i = min(_chan["i"], len(cands) - 1)
+    return [cands[i]] + [u for j, u in enumerate(cands) if j != i]
 
 
 async def get_json(url, referer=None, timeout=15):
@@ -347,26 +362,23 @@ async def get_json(url, referer=None, timeout=15):
     if hit and now - hit[0] < TTL:
         return hit[1]
     headers = UA if not referer else {**UA, "Referer": referer}
-    if "ifzq.gtimg.cn" in url:  # 双域回退：优先当前已知可用域，被 WAF 挑战就换另一个
-        i = _ifzq_pref["i"]
-        hosts = (IFZQ_HOSTS[i], IFZQ_HOSTS[1 - i])
-    else:
-        hosts = (None,)
+    urls = _ifzq_urls(url) if "ifzq.gtimg.cn" in url else [url]
     data = None
-    async with httpx.AsyncClient(timeout=timeout, headers=headers) as cli:
-        for host in hosts:
-            u = _swap_host(url, host) if host else url
+    # trust_env=False：httpx 默认会读 macOS 系统代理（scutil --proxy），代理内核退出后端口悬空会让
+    # 所有行情请求在本地被拒（表现就是「K线全部异常」）。行情源都是直连可达的国内接口，固定不走代理。
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, trust_env=False) as cli:
+        for u in urls:
             try:
                 r = await cli.get(u)
                 data = json.loads(r.content.decode("utf-8"))  # 上游是 UTF-8，但 header 不标，得强解
-            except Exception:  # 连不上 / 501 挑战页 / 非 JSON 都算该域不可用
+            except Exception:  # 连不上 / 501 挑战页 / 非 JSON 都算该通道不可用
                 data = None
                 continue
-            if host:
-                _ifzq_pref["i"] = IFZQ_HOSTS.index(host)
+            host = urlsplit(u).netloc
+            _chan["i"] = IFZQ_HOSTS.index(host) if host in IFZQ_HOSTS else len(IFZQ_HOSTS)
             break
     if data is None:
-        raise HTTPException(502, "上游行情源返回异常（疑似腾讯WAF临时限流），请稍等片刻再刷新")
+        raise HTTPException(502, "上游行情源返回异常（腾讯 ifzq 与 proxy 通道均被 WAF 拦截），请稍等片刻再刷新")
     if len(_CACHE) > 300:
         _CACHE.clear()
     _CACHE[url] = (now, data)
@@ -379,7 +391,7 @@ async def get_text(url, gbk=False):
     hit = _CACHE.get(url)
     if hit and now - hit[0] < TTL:
         return hit[1]
-    async with httpx.AsyncClient(timeout=15, headers=UA) as cli:
+    async with httpx.AsyncClient(timeout=15, headers=UA, trust_env=False) as cli:  # 同上：不读系统代理
         r = await cli.get(url)
     data = r.content.decode("gbk", errors="replace") if gbk else r.content.decode("utf-8", errors="replace")
     if len(_CACHE) > 300:
@@ -687,9 +699,24 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
     }
 
 
-# ---------- 回测：单票 + 3日线 + K线实体箱体 ----------
+# ---------- 回测：单票 + 3 根均线 + K线实体箱体（策略类型见 BT_STRATS）----------
 # 口径：docs/回测规则口径.md。与 orders/orders_live 完全隔离，只在内存里重演，不落库。
-BT_PAR_TOL = 0.2  # 两日箱体「平行」阈值：顶对顶、底对底各自偏移不超过前日实体高度的 20%
+BT_PAR_TOL = 0.2  # 两日箱体「平行」阈值：顶对顶、底对底各自偏移不超过前根实体高度的 20%
+BT_PENET = 0.2    # 买入允许 MA3 侵入实体的高度比例：0.2 即实体至少 80% 的高度站在均线上方
+# 策略类型：两套共用同一份 bt_run 规则，只有取数周期不同
+#   day=日k占Ma3（默认，每根=1 个交易日）  m60=1小时k占Ma3（每根=1 小时，A股每天 4 根）
+# m60 的根数上限：腾讯分钟K 单次最多约 800 根（超过 800 上游回落到 320 根），故 limit+MA_WARM 卡在 800
+BT_STRATS = {"day": {"period": "day", "label": "日k占Ma3", "limit": 800},
+             "m60": {"period": "m60", "label": "1小时k占Ma3", "limit": 800 - MA_WARM}}
+
+
+def bt_lab(v):
+    # 分钟K上游给 14 位紧凑串（202610281030），转成 "2026-10-28 10:30"：同一天有多根，
+    # 坐标轴/成交明细/买卖点对位都必须到分钟，否则同日的多笔成交会被绘制到第一根上
+    s = str(v)
+    if len(s) >= 12 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[8:10]}:{s[10:12]}"
+    return s[:16] if len(s) > 10 else s[:10]
 
 
 def bt_box(r):
@@ -698,13 +725,26 @@ def bt_box(r):
     return max(o, c), min(o, c), abs(c - o)
 
 
-def bt_run(rows, ma3, capital, each):
-    # 逐日重演。rows=[日期,开,收,高,低,量] 升序，ma3 与之等长（含预热，区间首根即有值）
+def bt_gc(ma3, ma5, i):
+    # MA3 金叉 MA5：当根 MA3 由「不高于 MA5」翻到「高于 MA5」才算金叉，只认上穿的那一根。
+    # 反向（死叉，MA3 在 MA5 下方或从上方翻下来）以及「已在 MA5 上方但没再上穿」都不买——
+    # 所以即使实体整体（或大部分）站上 MA3，只要 MA3 没有金叉上行，同样不买。
+    if i <= 0 or i >= len(ma3) or i >= len(ma5):
+        return False
+    a, b, pa, pb = ma3[i], ma5[i], ma3[i - 1], ma5[i - 1]
+    if None in (a, b, pa, pb):
+        return False
+    return a > b and pa <= pb
+
+
+def bt_run(rows, ma3, ma5, capital, each):
+    # 逐日重演。rows=[日期,开,收,高,低,量] 升序，ma3/ma5 与之等长（含预热，区间首根即有值）
     cash, qty, cost = float(capital), 0.0, 0.0
     trades, nav = [], []
     peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
     for i, r in enumerate(rows):
-        date, close = r[0][:10], float(r[2])
+        date = r[0][:16] if len(r[0]) > 10 else r[0][:10]  # 日K 到日，1 小时K 到分钟
+        close = float(r[2])
         top, bot, hgt = bt_box(r)
         m = ma3[i] if i < len(ma3) else None
         # 两日箱体平行（顶∩顶、底∩底都只挪了不到前日实体高度的 20%）→ 当日不买也不卖
@@ -735,13 +775,19 @@ def bt_run(rows, ma3, capital, each):
             realized_all += gain
             if gain > 0:
                 win += 1
-        # 买入：非平行日 + 3 日线在实体底部之下（整根实体站在均线上方）+ 实体底部高于前一日实体底部
-        # （箱体在抬高，未抬高即不买）→ 每次买 each 元；卖出当日不再买；区间首根无前日，不施加抬底条件
-        elif not par and m is not None and m < bot and (pbot is None or bot > pbot) and cash >= each:
+        # 买入：非平行日 + 3 日线金叉 5 日线（MA3 上穿 MA5 的那一根，见 bt_gc）
+        # + 3 日线不高于「实体底 + 20% 实体高度」（实体至少 80% 站在均线上方，允许均线浅穿下沿）
+        # + 3 日线仍在实体顶之下（整根实体不会沉到均线下方）+ 实体底部高于前一日实体底部
+        # （箱体在抬高，未抬高即不买）→ 每次买 each 元；卖出当日不再买；区间首根无前日，上述含前日
+        # 比较的条件都不成立（不买）。金叉是硬闸门：MA3 死叉下行时只有箱体占上 MA3 也不买
+        # 实体高度为 0（一字线）时 bot + 0.2 * hgt 退化为 bot，条件即旧口径的 MA3 < 实体顶 = 实体底
+        elif (not par and m is not None and bt_gc(ma3, ma5, i)
+              and m <= bot + BT_PENET * hgt and m < top
+              and (pbot is None or bot > pbot) and cash >= each):
             add = each / close
             trades.append({"date": date, "side": "buy", "price": round(close, 4),
                            "qty": round(add, 4), "amount": round(each, 2),
-                           "realized": None, "reason": "ma3"})
+                           "realized": None, "reason": "gc"})
             cash -= each
             cost = (cost * qty + close * add) / (qty + add)
             qty += add
@@ -780,24 +826,30 @@ def bt_run(rows, ma3, capital, each):
 @app.get("/api/backtest")
 async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
                    capital: float = 100000.0, each: float = 10000.0,
-                   name: str = "", save: bool = True):
+                   name: str = "", save: bool = True, tf: str = "day"):
     if capital <= 0 or each <= 0:
         return {"error": "本金与单次买入金额需大于 0"}
-    d = await kline(symbol, "day", 800, start, end)  # 复用日K取数口径（含均线预热与区间切片）
+    st_tf = BT_STRATS.get(tf)
+    if not st_tf:
+        return {"error": "策略类型只支持 day（日k占Ma3）/ m60（1小时k占Ma3）"}
+    d = await kline(symbol, st_tf["period"], st_tf["limit"], start, end)  # 复用 kline 取数口径（含均线预热与区间切片）
     if d.get("error"):
         return d
     rows = d.get("klines") or []
+    if st_tf["period"] != "day":  # 分钟K 标签统一到 "YYYY-MM-DD HH:MM"，bt_run 与图面都用它当行标识
+        rows = [[bt_lab(r[0])] + list(r[1:]) for r in rows]
     if len(rows) < 3:
-        return {"error": "区间内交易日不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
-    res = bt_run(rows, (d.get("ind") or {}).get("ma3") or [], capital, each)
+        return {"error": "区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
     ind = d.get("ind") or {}
-    # 回测只用 MA3 判信号，但图面要同时叠 MA3/MA5/MA85/MA125 四条均线供对照
-    res.update({"symbol": symbol, "period": "day", "klines": rows,
+    res = bt_run(rows, ind.get("ma3") or [], ind.get("ma5") or [], capital, each)
+    # 回测用 MA3/MA5 判信号（MA3 金叉 MA5 + 实体占上 MA3），图面另叠 MA3/MA5/MA85/MA125 四条均线供对照
+    res.update({"symbol": symbol, "period": st_tf["period"], "tf": tf, "strat": st_tf["label"],
+                "klines": rows,
                 "ma3": ind.get("ma3") or [],
                 "ind": {k: ind.get(k) or [] for k in ("ma3", "ma5", "ma85", "ma125")}})
     if save:  # 每次回测自动落一条记录（供「回测记录」翻阅），落库失败不影响本次结果
         st0 = res.get("stats") or {}
-        snap = {"symbol": symbol, "name": name or symbol,
+        snap = {"symbol": symbol, "name": name or symbol, "tf": tf, "strat": st_tf["label"],
                 "start": start or st0.get("first", ""), "end": end or st0.get("last", ""),
                 "capital": float(capital), "each": float(each),
                 # 快照只留画图要用的前5列（日期/开/收/高/低），去掉成交量缩体积
@@ -813,24 +865,25 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
 
 # ---------- 回测记录：存/取快照供「回测记录」展示（只读自身表，与 orders/orders_live 无关） ----------
 def _bt_save(snap, payload):
-    # 同参数（标的+区间+本金+每次买入）重复回测覆盖上一条，避免记录列表被重复项刷满
+    # 同参数（策略+标的+区间+本金+每次买入）重复回测覆盖上一条，避免记录列表被重复项刷满
     ts = datetime.datetime.now().strftime(TS_FMT)
     con = _conn()
     try:
         with con:
             old = con.execute(
-                "SELECT id FROM backtests WHERE symbol=? AND start=? AND end=? AND capital=? AND each=? "
+                "SELECT id FROM backtests WHERE symbol=? AND start=? AND end=? AND capital=? AND each=? AND tf=? "
                 "ORDER BY id DESC LIMIT 1",
-                (snap["symbol"], snap["start"], snap["end"], snap["capital"], snap["each"])).fetchone()
+                (snap["symbol"], snap["start"], snap["end"], snap["capital"], snap["each"],
+                 snap.get("tf") or "day")).fetchone()
             if old:
-                con.execute("UPDATE backtests SET name=?, created=?, payload=? WHERE id=?",
-                            (snap["name"], ts, payload, old["id"]))
+                con.execute("UPDATE backtests SET name=?, tf=?, created=?, payload=? WHERE id=?",
+                            (snap["name"], snap.get("tf") or "day", ts, payload, old["id"]))
                 return old["id"], ts
             cur = con.execute(
-                "INSERT INTO backtests (symbol, name, start, end, capital, each, created, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO backtests (symbol, name, start, end, capital, each, tf, created, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (snap["symbol"], snap["name"], snap["start"], snap["end"],
-                 snap["capital"], snap["each"], ts, payload))
+                 snap["capital"], snap["each"], snap.get("tf") or "day", ts, payload))
             return cur.lastrowid, ts
     finally:
         con.close()
@@ -841,7 +894,7 @@ async def bt_records(limit: int = 200):
     # 列表只返回摘要（payload 里的 K 线大 JSON 不返回），点开某条再取详情
     con = _conn()
     try:
-        rows = con.execute("SELECT id, symbol, name, start, end, capital, each, created, payload "
+        rows = con.execute("SELECT id, symbol, name, start, end, capital, each, tf, created, payload "
                            "FROM backtests ORDER BY created DESC, id DESC LIMIT ?",
                            (max(1, min(limit, 500)),)).fetchall()
     finally:
@@ -852,9 +905,12 @@ async def bt_records(limit: int = 200):
             st = (json.loads(r["payload"]) or {}).get("stats") or {}
         except Exception:
             st = {}
+        tf = r["tf"] or "day"
         items.append({"id": r["id"], "symbol": r["symbol"], "name": r["name"],
                       "start": r["start"], "end": r["end"], "created": r["created"],
-                      "capital": r["capital"], "each": r["each"], "stats": st})
+                      "capital": r["capital"], "each": r["each"], "tf": tf,
+                      "strat": (BT_STRATS.get(tf) or {}).get("label", BT_STRATS["day"]["label"]),
+                      "stats": st})
     return {"items": items}
 
 
@@ -862,7 +918,7 @@ async def bt_records(limit: int = 200):
 async def bt_record(rid: int):
     con = _conn()
     try:
-        r = con.execute("SELECT id, symbol, name, start, end, capital, each, created, payload "
+        r = con.execute("SELECT id, symbol, name, start, end, capital, each, tf, created, payload "
                         "FROM backtests WHERE id=?", (rid,)).fetchone()
     finally:
         con.close()
@@ -872,9 +928,12 @@ async def bt_record(rid: int):
         data = json.loads(r["payload"])
     except Exception:
         return {"error": "记录内容已损坏，删掉重新回测即可"}
+    tf = r["tf"] or "day"
     return {"id": r["id"], "symbol": r["symbol"], "name": r["name"], "start": r["start"],
             "end": r["end"], "capital": r["capital"], "each": r["each"],
-            "created": r["created"], "data": data}
+            "created": r["created"], "tf": tf,
+            "strat": (BT_STRATS.get(tf) or {}).get("label", BT_STRATS["day"]["label"]),
+            "data": data}
 
 
 @app.delete("/api/backtests/{rid}")
@@ -1347,6 +1406,7 @@ async def _qt_bulk(syms):
             try:
                 out[var.strip().removeprefix("v_")] = {
                     "price": float(f[3]),
+                    "prev": float(f[4]) if f[4] not in ("", "0") else 0.0,  # 昨收：顶部条算涨幅用
                     "open": float(f[5]) if f[5] not in ("", "0") else 0.0,
                     "day": _ts_day(f[30]),
                 }
@@ -1364,21 +1424,81 @@ async def _signal_of(sym, mkt, q, sem):
         d = await kline(sym, "day", 12, "", "")
     rows = d.get("klines") or []
     hist = [r for r in rows if r[0][:10].replace("-", "") < today]  # 只保留昨日及更早
-    if len(hist) < 2:
-        return None
+    if len(hist) < 5:
+        return None  # 金叉要昨日的 MA3/MA5，两条均线最远用到前五根收盘，不够就不判
     px = q["price"]
     op = q["open"] or float(hist[-1][2])  # 今开缺失（集合竞价前）退化用昨收
+    c1, c2, c3, c4, c5 = (float(hist[-k][2]) for k in (1, 2, 3, 4, 5))  # 昨收、前二至前五根收盘
+    ma3 = (c2 + c1 + px) / 3  # 今日 MA3 = 前两日收盘 + 今日现价
+    ma5 = (c4 + c3 + c2 + c1 + px) / 5  # 今日 MA5（同口径用现价代今日收盘）
+    ma3p, ma5p = (c3 + c2 + c1) / 3, (c5 + c4 + c3 + c2 + c1) / 5  # 昨日 MA3/MA5
+    if not (ma3 > ma5 and ma3p <= ma5p):
+        return None  # 3 日线没金叉 5 日线（死叉下行，或已在 MA5 上方但未再上穿）：只有箱体占上 MA3 也不提醒
     top, bot = max(op, px), min(op, px)
+    hgt = top - bot  # 今日实体高度：给 20% 浅穿阈值用
     ptop, pbot, phgt = bt_box(hist[-1])
     tol = phgt * BT_PAR_TOL
     if phgt > 0 and abs(top - ptop) <= tol and abs(bot - pbot) <= tol:
         return None  # 两日箱体平行：回测口径里不买不卖
     if bot <= pbot:
         return None  # 今日实体底未高于昨日实体底（箱体底部没抬高）：不买入，与回测同一口径
-    ma3 = (float(hist[-2][2]) + float(hist[-1][2]) + px) / 3  # MA3 = 前两日收盘 + 今日现价
-    if ma3 >= bot:
+    if ma3 > bot + BT_PENET * hgt or ma3 >= top:
+        return None  # 均线侵入实体底部超过 20% 高度，或已升到实体顶之上：不提醒（与回测同一口径）
+    return {"symbol": sym, "price": px, "ma3": round(ma3, 4), "ma5": round(ma5, 4), "bot": round(bot, 4)}
+
+
+async def _heat_of(sym, mkt, q, sem):
+    # 顶部固定条「优异标的」用：与 _signal_of 完全同一套数据与口径，但每只都返回（含没命中的），
+    # 由前端自己排序展示。hit=True 即收盘前提醒会弹出来的那一只。
+    today = _mkt_now(mkt).date().strftime("%Y%m%d")
+    async with sem:
+        d = await kline(sym, "day", 12, "", "")
+    rows = d.get("klines") or []
+    hist = [r for r in rows if r[0][:10].replace("-", "") < today]
+    if len(hist) < 5:
         return None
-    return {"symbol": sym, "price": px, "ma3": round(ma3, 4), "bot": round(bot, 4)}
+    live = bool(q and q["price"] > 0 and q["day"] == today)
+    px = q["price"] if live else float(hist[-1][2])  # 休市（美股白天等）用最后一根收盘当现价
+    op = (q["open"] if live else 0) or float(hist[-1][1]) or float(hist[-1][2])
+    prev = (q["prev"] if live else 0) or float(hist[-2][2])
+    c1, c2, c3, c4, c5 = (float(hist[-k][2]) for k in (1, 2, 3, 4, 5))
+    ma3 = (c2 + c1 + px) / 3
+    ma5 = (c4 + c3 + c2 + c1 + px) / 5
+    ma3p, ma5p = (c3 + c2 + c1) / 3, (c5 + c4 + c3 + c2 + c1) / 5
+    gc = ma3 > ma5 and ma3p <= ma5p
+    top, bot = max(op, px), min(op, px)
+    hgt = top - bot
+    ptop, pbot, phgt = bt_box(hist[-1])
+    tol = phgt * BT_PAR_TOL
+    par = phgt > 0 and abs(top - ptop) <= tol and abs(bot - pbot) <= tol
+    hit = bool(gc and not par and bot > pbot and ma3 <= bot + BT_PENET * hgt and ma3 < top)
+    return {"symbol": sym, "price": px, "pct": round((px / prev - 1) * 100, 2) if prev > 0 else 0.0,
+            "ma3": round(ma3, 4), "ma5": round(ma5, 4), "gc": bool(gc), "hit": hit,
+            # bull=MA3 在 MA5 上方且仍在上行（多头没坏）；休市标的 pct 是最后一根对前一根的涨跌
+            "bull": bool(ma3 > ma5 and ma3 > ma3p), "live": live}
+
+
+@app.get("/api/heat")
+async def heat():
+    # 顶部固定条专用：一次扫完两个仓的全部标的，只返回数据、不弹通知（通知通道见 /api/notify/scan）
+    con = _conn()
+    rows = con.execute("SELECT symbol, name FROM cards UNION SELECT symbol, name FROM cards_live").fetchall()
+    con.close()
+    names = {r["symbol"]: r["name"] for r in rows}
+    syms = list(names)
+    at = _beijing_now().strftime("%H:%M:%S")
+    if not syms:
+        return {"items": [], "at": at}
+    qs = await _qt_bulk(syms)
+    sem = asyncio.Semaphore(3)
+    res = await asyncio.gather(*(_heat_of(s, _mkt_of(s), qs.get(s), sem) for s in syms), return_exceptions=True)
+    items = []
+    for s, r in zip(syms, res):
+        if isinstance(r, dict):
+            r["name"] = names.get(s, "")
+            r["market"] = _mkt_of(s)
+            items.append(r)
+    return {"items": items, "at": at}
 
 
 async def scan_signals(mkts=None):
