@@ -270,12 +270,15 @@ let keepTip = "";   // 自动兜底时写下的说明：成功路径不能像往
 // m1 同样 676（cnt=800 实测稳定）：配合默认近 2 个交易日，足够盖住 A股约 480 根 / 美股约 782 根 / 港股约 664 根
 const SR_LIMIT = { m1: 676, m5: 660, m15: 676, m30: 676, m60: 676, day: 400 };
 // 时间范围自动档的默认跨度：分钟档一律最近 2 个交易日（上游分钟K历史很短，2 天最稳）；
-// 「日」档要看日线趋势就得给足，取最近 180 个交易日（约 9 个月，足有 MA85 预热与成规模的交易）
+// 「日」档只取最近 1 个月（约 22 个交易日）：够看出日线趋势又不至于把区间拉到半年以上；
+// 区间外的均线历史由后端预热补齐（日档筛选态按 800 根取数后再切片），MA85 不会因此缺格
 const RANGE_DAYS = 2;
-const DAY_RANGE = 180;
+const DAY_RANGE = 22;
 const rangeDays = () => (period === "day" ? DAY_RANGE : RANGE_DAYS);
 const COL_SHORT = "#2f80ed";   // 空头腿统一用蓝色，与多头红绿区分
-const SR_NAME = { lo: "开多", lc: "平多", so: "开空", sc: "平空", bo: "买反向", bc: "卖反向" };
+// 「日」档走后端 bt_run（index.html 的回测策略），成交 reason 是 gc/add/back/hb/half/gb/dc/weak/drop，一并给中文名
+const SR_NAME = { lo: "开多", lc: "平多", so: "开空", sc: "平空", bo: "买反向", bc: "卖反向",
+  gc: "金叉买入", add: "加仓", back: "重回买入", hb: "半份买入", half: "减半仓", gb: "绿K减半", dc: "死叉清仓", weak: "弱势清仓", drop: "跌4%清仓" };
 const tsKey = v => String(v).replace(/[-:\s]/g, "");   // "2026-10-30 16:00" 与 "202610301600" 统一成紧凑串
 // 金额格式：千分位 + 两位小数，正数带 +（盈利为负时保留负号）
 const money = v => `${(v || 0) >= 0 ? "+" : ""}${(v || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -340,15 +343,17 @@ function fmtTs(s) {
 // 两个标的的时间不一定完全一致（停牌/上市日不同）：类目取并集，各自按时间对齐，缺根置 null
 function align() {
   const cats = [...new Set([...A.rows.map(r => r[0]), ...B.rows.map(r => r[0])])].sort();
-  const at = {};
-  cats.forEach((c, i) => { at[c] = i; });
+  // at：原始键，给 fill 按行时间对齐用；atn：去掉 - 空格 : 后的紧凑键，给回测成交日期对齐用
+  //（日档类目是 "2026-10-30"、分钟档是 12 位 "202610301600"，成交日期可能是 "2026-10-30" 或 "2026-10-30 16:00"，只认原始键会漏掉日档全部成交点）
+  const at = {}, atn = {};
+  cats.forEach((c, i) => { at[c] = i; atn[tsKey(c)] = i; });
   const fill = (rows, f) => { const a = cats.map(() => null); rows.forEach(r => { a[at[r[0]]] = f(r); }); return a; };
-  return { cats, at, fill };
+  return { cats, at, atn, fill };
 }
 
 function spanOf(rows, ind) {
   let lo = Infinity, hi = -Infinity;
-  rows.forEach(r => { const l = +r[4], h = +r[3]; if (l < lo) lo = l; if (h < hi) hi = h; });
+  rows.forEach(r => { const l = +r[4], h = +r[3]; if (l < lo) lo = l; if (h > hi) hi = h; });
   // 长均线含窗口外预热价，Y 轴须并入，防止均线被上下边缘裁掉
   Object.keys(MA_COLOR).forEach(key => (ind[key] || []).forEach(v => {
     if (v == null) return;
@@ -411,7 +416,7 @@ function renderTitles() {
 }
 
 function opt() {
-  const { cats, at, fill } = align();
+  const { cats, atn, fill } = align();
   // ECharts 5.5 的 candlestick 不接受裸 null 数据项（getInitialData 里读 null.value 会直接抛错，整张图白屏），
   // 两个标的的交易时段不同（港股带午休、美股连续）时并集里必然会缺根，缺根用全 null 数组占位
   const kf = rows => fill(rows, r => [+r[1], +r[2], +r[4], +r[3]]).map(v => v || [null, null, null, null]);
@@ -420,10 +425,10 @@ function opt() {
   const aBase = baseOf(A.rows), bBase = baseOf(B.rows);
   const pad = (aHi - aLo) * 0.06;
   const padB = (bHi - bLo) * 0.06;
-  // 买卖点画在 K 线外侧（最低价-pad / 最高价+pad），开回测时 Y 轴再各放宽 1.8 个 pad，
-  // 否则落在区间最高价/最低价那一根的标记会被坐标系裁掉（上下两图各按自己的价格区间放宽）
-  const aLo2 = sr ? aLo - pad * 1.8 : aLo, aHi2 = sr ? aHi + pad * 1.8 : aHi;
-  const bLo2 = sr ? bLo - padB * 1.8 : bLo, bHi2 = sr ? bHi + padB * 1.8 : bHi;
+  // 买卖点画在 K 线外侧（最低价-pad / 最高价+pad），开回测时 Y 轴再各放宽 2.4 个 pad：
+  // 不只要不裁掉三角本身，还要给外侧的 B/S 字母标签留出位置
+  const aLo2 = sr ? aLo - pad * 2.4 : aLo, aHi2 = sr ? aHi + pad * 2.4 : aHi;
+  const bLo2 = sr ? bLo - padB * 2.4 : bLo, bHi2 = sr ? bHi + padB * 2.4 : bHi;
   const aMap = new Map(A.rows.map(r => [r[0], r]));
   const bMap = new Map(B.rows.map(r => [r[0], r]));
   // MACD 直接用后端 /api/kline 算好的 dif/dea/macd（口径 MACD(5,10,3)、EMA 从首根起步），
@@ -446,12 +451,15 @@ function opt() {
   // 跨标的反手：leg=A 的成交画上图、leg=B 的画下图；两图配色一致（买=红 B 朝上，卖=绿 S 朝下）
   const marks = (leg, side) => (sr ? sr.trades.filter(t => (t.leg || "A") === leg && t.side === side) : []).map(t => {
     const mp = leg === "B" ? bMap : aMap, pd = leg === "B" ? padB : pad;
-    const i = at[tsKey(t.date)];
+    const i = atn[tsKey(t.date)];
     const r = i == null ? null : mp.get(cats[i]);
     if (!r) return null;
     const c = side === "buy" ? COL.up : COL.dn;
     return { value: [cats[i], side === "buy" ? +r[4] - pd : +r[3] + pd], t,
-      itemStyle: { color: c }, label: { show: true, formatter: side === "buy" ? "B" : "S", color: c } };
+      itemStyle: { color: c, borderColor: "#0d1117", borderWidth: 1 },
+      // 深色描边 + 加粗：红绿三角在密集 K 线上也要一眼能认出来
+      label: { show: true, formatter: side === "buy" ? "B" : "S", color: c, fontWeight: 700,
+        textBorderColor: "#0d1117", textBorderWidth: 2 } };
   }).filter(Boolean);
   return {
     animation: false,
@@ -472,7 +480,8 @@ function opt() {
           s += `<br/><span style="color:${COL.tx}">${tag} ${sym}</span>　开 ${r[1]}　高 ${r[3]}<br/>`
             + `　低 ${r[4]}　收 ${r[2]}　涨跌 ${chg}%　量 ${fmtVol(+r[5])}`;
         });
-        if (sr) sr.trades.filter(t => tsKey(t.date) === cats[i]).forEach(t => {  // 该根的回测成交
+        const bk = tsKey(cats[i]);   // 日档 cats 为 "2026-10-30"、成交为同格式；分钟档两侧都成 12 位紧凑串再比
+        if (sr) sr.trades.filter(t => tsKey(t.date) === bk).forEach(t => {  // 该根的回测成交
           const c = t.leg === "B" ? COL_SHORT : (t.side === "buy" ? COL.up : COL.dn);
           s += `<br/><b style="color:${c}">${t.sym || A.sym} ${SR_NAME[t.reason] || "成交"}</b> ${t.price} × ${t.qty}`;
           if (t.realized != null) s += `　盈亏 ${t.realized >= 0 ? "+" : ""}${t.realized}`;
@@ -516,7 +525,7 @@ function opt() {
         textStyle: { color: COL.tx, fontSize: 10 } },
     ],
     series: [
-      { name: "K", type: "candlestick", xAxisIndex: 0, yAxisIndex: 0, data: kf(A.rows),
+      { name: "K", type: "candlestick", xAxisIndex: 0, yAxisIndex: 0, data: kf(A.rows), barWidth: "45%",
         itemStyle: { color: COL.up, color0: COL.dn, borderColor: COL.up, borderColor0: COL.dn } },
       // 均线按时间戳对齐到 cats 并集：两标的时段不同时按行号硬塞会整体错位
       ...Object.entries(MA_COLOR).map(([key, c]) => ({ name: key.toUpperCase(), id: key.toUpperCase(), type: "line",
@@ -530,20 +539,20 @@ function opt() {
         lineStyle: { width: 1, color: "#4cc9f0" }, itemStyle: { color: "#4cc9f0" } },
       ...(sr ? [
         // 止损反手买卖点：A 腿（上方标的）画上图、B 腿（下方反向标的）画下图，两图同为红 B / 绿 S
-        { name: "买", id: "买", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolSize: 11,
-          data: hidden.has("买") ? [] : marks("A", "buy"), z: 5,
-          label: { position: "bottom", fontSize: 10, fontWeight: 700 } },
-        { name: "卖", id: "卖", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolRotate: 180, symbolSize: 11,
-          data: hidden.has("卖") ? [] : marks("A", "sell"), z: 5,
-          label: { position: "top", fontSize: 10, fontWeight: 700 } },
-        { name: "买B", id: "买B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolSize: 11,
-          data: hidden.has("买") ? [] : marks("B", "buy"), z: 5,
-          label: { position: "bottom", fontSize: 10, fontWeight: 700 } },
-        { name: "卖B", id: "卖B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolRotate: 180, symbolSize: 11,
-          data: hidden.has("卖") ? [] : marks("B", "sell"), z: 5,
-          label: { position: "top", fontSize: 10, fontWeight: 700 } },
+        { name: "买", id: "买", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolSize: 15,
+          data: hidden.has("买") ? [] : marks("A", "buy"), z: 5, emphasis: { scale: 1.4 },
+          label: { position: "bottom", distance: 4, fontSize: 11, fontWeight: 700 } },
+        { name: "卖", id: "卖", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolRotate: 180, symbolSize: 15,
+          data: hidden.has("卖") ? [] : marks("A", "sell"), z: 5, emphasis: { scale: 1.4 },
+          label: { position: "top", distance: 4, fontSize: 11, fontWeight: 700 } },
+        { name: "买B", id: "买B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolSize: 15,
+          data: hidden.has("买") ? [] : marks("B", "buy"), z: 5, emphasis: { scale: 1.4 },
+          label: { position: "bottom", distance: 4, fontSize: 11, fontWeight: 700 } },
+        { name: "卖B", id: "卖B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolRotate: 180, symbolSize: 15,
+          data: hidden.has("卖") ? [] : marks("B", "sell"), z: 5, emphasis: { scale: 1.4 },
+          label: { position: "top", distance: 4, fontSize: 11, fontWeight: 700 } },
       ] : []),
-      { name: "K2", type: "candlestick", xAxisIndex: 2, yAxisIndex: 3, data: kf(B.rows),
+      { name: "K2", type: "candlestick", xAxisIndex: 2, yAxisIndex: 3, data: kf(B.rows), barWidth: "45%",
         itemStyle: { color: COL.up, color0: COL.dn, borderColor: COL.up, borderColor0: COL.dn } },
       // 下图均线不进图例（名称加后缀），否则图例会被 8 条线挤满
       ...Object.entries(MA_COLOR).map(([key, c]) => ({ name: key.toUpperCase() + "₂", type: "line",
@@ -589,7 +598,7 @@ function renderTabs() {
       if (b.dataset.p === period) return;
       period = b.dataset.p;
       renderTabs();
-      // 自动档下时间范围按新周期重算默认近 2 个交易日；手选过日期就不动它
+      // 自动档下时间范围按新周期重算默认跨度（分钟档近 2 个交易日、日档近 1 个月）；手选过日期就不动它
       if (autoRange) { pickRange().then(() => { if (srOn) load(); }); return; }
       if (srOn) load(); else tip("请先确定上/下标的与时间范围，再点「止损反手」");
     };
@@ -636,7 +645,7 @@ function weekdayRange() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   d.setDate(d.getDate() - 1);
-  for (let i = 0; i < 400 && out.length < rangeDays(); i++) {   // 最多回退 400 天，防死循环（日档要数 180 个工作日）
+  for (let i = 0; i < 400 && out.length < rangeDays(); i++) {   // 最多回退 400 天，防死循环（日档要数 22 个工作日）
     const w = d.getDay();
     if (w !== 0 && w !== 6) out.unshift(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
     d.setDate(d.getDate() - 1);
@@ -646,7 +655,7 @@ function weekdayRange() {
 // 返回 true=按日K真实交易日填好；"fallback"=日K取不到、按工作日兜底；false=彻底没填上
 async function pickRange() {
   try {
-    const d = await getJSON(`/api/kline?symbol=${A.sym}&period=day&limit=${Math.max(20, rangeDays() + 5)}`);   // 日档要取足够长的日K 才数得出 180 个交易日
+    const d = await getJSON(`/api/kline?symbol=${A.sym}&period=day&limit=${Math.max(20, rangeDays() + 5)}`);   // 日档要取足够长的日K 才数得出 22 个交易日
     // 只认 8 位纯数字日期：上游偶尔换格式（带秒/时间戳）时不能把非法值塞进 input[type=date]，否则浏览器显示成空
     const ds = [...new Set((d.klines || []).map(r => String(r[0]).replace(/[-:\s]/g, "").slice(0, 8)))]
       .filter(s => /^\d{8}$/.test(s)).sort();
@@ -662,6 +671,7 @@ async function pickRange() {
 }
 
 // 止损反手回测：与上图同一周期、同一取数根数（后端 SR_LIMITS 同口径），失败只影响统计条不影响 K 线
+// 「日」档后端改走 index.html 的 bt_run（MA3 金叉连买 / 死叉清仓 / 减半仓），两条腿各用一份本金独立重演
 async function loadSr() {
   if (!srOn) { sr = null; srErr = ""; return; }
   try {
@@ -677,7 +687,7 @@ async function loadSr() {
 function renderStat() {
   const el = $("kc-stat");
   if (!srOn) { el.innerHTML = '<span class="lg">尚未加载：请先确定上/下标的与时间范围，再点「止损反手」或「全额策略」</span>'; return; }
-  if (!sr) { el.innerHTML = `<span class="lg">止损反手回测失败：${srErr || "回测结果未返回（请重试，或换个时间范围）"}</span>`; return; }
+  if (!sr) { el.innerHTML = `<span class="lg">${period === "day" ? "日线回测" : "止损反手回测"}失败：${srErr || "回测结果未返回（请重试，或换个时间范围）"}</span>`; return; }
   const s = sr.stats || {}, sg = v => `${(v || 0) >= 0 ? "+" : ""}${(v || 0).toFixed(2)}`;
   el.innerHTML = [
     `<span>累计收益<b class="${(s.total || 0) >= 0 ? "up" : "dn"}">${sg(s.total)}%</b></span>`,
@@ -730,7 +740,7 @@ async function load(allowFallback = true) {
         }
       }
       renderStat();   // 先把回测结论上屏：K 线缺数据不该连累收益条
-      throw new Error("上图标的本周期暂时取不到数据（该日期可能早于分钟K可回溯范围或为休市日，改选最近 2 个交易日再试）");
+      throw new Error(`上图标的本周期暂时取不到数据（该日期可能早于行情源可回溯范围或为休市日，改选最近 ${rangeDays()} 个交易日再试）`);
     }
     updateHead();
     renderTitles();
@@ -744,7 +754,13 @@ async function load(allowFallback = true) {
     ch.setOption(opt(), true);
     renderStat();
     renderLegend();
-    $("kc-tip").textContent = keepTip;   // 有兜底说明就留着，否则清空加载提示
+    // 成功路径把成交笔数一并写进提示：图上看不到买卖点时，先看这行是 0 笔还是 N 笔即可分流
+    //（N 笔却看不到点 = 渲染问题；0 笔 = 这段区间本来就没触发）
+    const nT = (sr && sr.trades) ? sr.trades.length : 0;
+    const nB = (sr && sr.trades) ? sr.trades.filter(t => t.side === "buy").length : 0;
+    const sum = `上 ${A.rows.length} 根 · 下 ${B.rows.length} 根 · 成交 ${nT} 笔（买 ${nB} / 卖 ${nT - nB}）`
+      + (period === "day" ? "　|　日档：两腿各按 index 回测策略（MA3 金叉连买 / 死叉清仓 / 减半仓）独立重演" : "");
+    $("kc-tip").textContent = keepTip ? `${keepTip}　|　${sum}` : sum;
   } catch (e) {
     $("kc-tip").className = "kc-tip err";
     $("kc-tip").textContent = String(e.message || e);

@@ -1098,7 +1098,7 @@ BT_STRATS = {"day": {"period": "day", "label": "日k占Ma3", "limit": 800},
 # 止损反手可选的 K 线周期 → 取数根数：m5 上游单次上限最低（超 480 会回落 320），故卡 660；其余周期沿用 676（+预热=800）
 # m1 同样卡 676（cnt=800 实测稳定返回 800 根）：搭配前端默认近 2 个交易日，A股约 480 根 / 美股约 782 根 / 港股约 664 根
 SR_LIMITS = {"m1": 676, "m5": 660, "m15": 676, "m30": 676, "m60": 676,
-             # 日K：单一标的日线历史足够长，400 根（+预热 124 = 524）足以盖住前端默认的 180 个交易日区间
+             # 日K：单一标的日线历史足够长，400 根（+预热 124 = 524）足以盖住前端默认的最近 1 个月（约 22 个交易日）区间
              "day": 400}
 # ---------- 止损反手 v7（2026-11-02：站上当根买、掉下当根卖，两边各看自己的 MA5/MA85）----------
 # 用户口径：快线（MA5）站上慢线（MA85）就买，掉下就卖——两条腿各自适用，不当根不延迟。
@@ -1648,6 +1648,62 @@ def bt_run(rows, ma3, ma5, capital, each, stop_drop=False):
     }
 
 
+def _bt_day_legs(rows_a, ind_a, sym_a, mkt_a, rows_b, ind_b, sym_b, mkt_b, capital, each):
+    # 日档的两条腿（对应 fanshou.html 上下两张图）：各自按 index.html 的 bt_run 独立重演——
+    # 每腿一份 capital 本金、每根最多买 each，日线不做「哪边趋势好买哪边」的跨标的换手，买卖点各画在自己的图上。
+    # 组合口径 = 两腿等权（各 50%）：total/pnl/end/realized 按两腿平均，mdd 用两腿净值等权合成的日曲线算。
+    ra = bt_run(rows_a, ind_a.get("ma3") or [], ind_a.get("ma5") or [], capital, each, mkt_a == "a")
+    rb = bt_run(rows_b, ind_b.get("ma3") or [], ind_b.get("ma5") or [], capital, each, mkt_b == "a")
+    trades = ([dict(t, sym=sym_a, leg="A") for t in ra["trades"]]
+              + [dict(t, sym=sym_b, leg="B") for t in rb["trades"]])
+    sa, sb = ra["stats"], rb["stats"]
+    pnl_a = float(sa["end"]) - float(capital)
+    pnl_b = float(sb["end"]) - float(capital)
+    # 组合净值：以 A 的时间轴为准，B 缺该日（停牌/上市日不同）沿用上一根的权益
+    bmap = {n["date"]: n["equity"] for n in rb["nav"]}
+    nav, last_b, peak, mdd = [], float(capital), float(capital), 0.0
+    for n in ra["nav"]:
+        last_b = bmap.get(n["date"], last_b)
+        e = (n["equity"] + last_b) / 2
+        peak = max(peak, e)
+        mdd = min(mdd, e / peak - 1)
+        nav.append({"date": n["date"], "equity": round(e, 2),
+                    "pct": round((e / float(capital) - 1) * 100, 4)})
+    pnl = (pnl_a + pnl_b) / 2
+    total = pnl / float(capital) * 100
+    closed = (sa.get("sells") or 0) + (sb.get("sells") or 0)
+    win = (sa.get("win") or 0) + (sb.get("win") or 0)
+    days = 0
+    if len(rows_a) >= 2:
+        days = (datetime.date.fromisoformat(rows_a[-1][0][:10]) - datetime.date.fromisoformat(rows_a[0][0][:10])).days
+    years = days / 365
+    return {
+        "trades": trades, "nav": nav,
+        "stats": {
+            "capital": round(float(capital), 2), "end": round(float(capital) + pnl, 2),
+            "total": round(total, 2), "mdd": round(mdd * 100, 2),
+            "ann": round((pow(1 + total / 100, 1 / years) - 1) * 100, 2) if years >= 0.25 else None,
+            "buys": sum(1 for t in trades if t["side"] == "buy"),
+            "sells": closed, "win": win,
+            "winrate": round(win / closed * 100, 1) if closed else None,
+            "realized": round(((sa.get("realized") or 0) + (sb.get("realized") or 0)) / 2, 2),
+            "realized_a": sa.get("realized"), "realized_b": sb.get("realized"),
+            "pnl": round(pnl, 2), "pnl_a": round(pnl_a, 2), "pnl_b": round(pnl_b, 2),
+            "ret_a": round(pnl_a / float(capital) * 100, 2), "ret_b": round(pnl_b / float(capital) * 100, 2),
+            "float_a": sa.get("float_pnl"), "float_b": sb.get("float_pnl"),
+            "float_pnl": round(((sa.get("float_pnl") or 0) + (sb.get("float_pnl") or 0)) / 2, 2),
+            "open_qty": sa.get("open_qty"), "open_cost": sa.get("open_cost"),
+            "short_qty": sb.get("open_qty"), "short_cost": sb.get("open_cost"),
+            "longs": sa.get("buys"), "shorts": sb.get("buys"),
+            "flips": 0, "closes": closed,
+            # day_bt=1：日档两条腿各自跑 index.html 的 bt_run（不是 bt_run_pair 的跨标的换手）
+            "pair": True, "day_bt": 1, "sym_a": sym_a, "sym_b": sym_b,
+            "first": sa.get("first"), "last": sa.get("last"),
+            "n": len(rows_a), "days": days,
+        },
+    }
+
+
 @app.get("/api/backtest")
 async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
                    capital: float = 100000.0, each: float = 10000.0,
@@ -1671,7 +1727,17 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
     if len(rows) < 3:
         return {"error": "区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
     ind = d.get("ind") or {}
-    if tf == "sr5" and pair:  # 跨标的反手：symbol=上方标的（信号源），pair=下方反向标的
+    if tf == "sr5" and pair and st_tf["period"] == "day":
+        # 日档（页面点「日」）：买卖改按 index.html 的回测策略（bt_run：MA3 金叉当根起连买 + 四道买入门禁 +
+        # 减半仓/半份买入 + 死叉/弱势/跌4% 清仓），不再走 bt_run_pair 的 MA5/MA85 跨标的止损反手
+        db = await kline(pair, "day", st_tf["limit"], start, end)
+        rows_b = db.get("klines") or []
+        if len(rows_b) < 3:
+            return {"error": f"反向标的 {pair} 在该区间取不到日K，请检查代码或换个周期"}
+        ind_b = db.get("ind") or {}
+        res = _bt_day_legs(rows, ind, symbol, _mkt_of(symbol),
+                           rows_b, ind_b, pair, _mkt_of(pair), capital, each)
+    elif tf == "sr5" and pair:  # 跨标的反手：symbol=上方标的（信号源），pair=下方反向标的
         db = await kline(pair, st_tf["period"], st_tf["limit"], start, end)
         rows_b = db.get("klines") or []
         if st_tf["period"] != "day":
