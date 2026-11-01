@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>反手</title>
+<!-- 策略页：独立单页（与 index.html 同一套深色调色板）。
+     当前内容：上下两个标的的分钟K线（上=标的A、下=标的B，共用一根时间轴与一个缩放条）。
+     标的由顶部两个代码输入框决定；数据来自后端 /api/kline?symbol=...&period=m1|m5|m15|m30|m60[&start/end]，
+     美股分钟K由后端新浪 getMinK 转发，一次约 1023 根（故"时间范围"只能在最近几个交易日内生效）。
+     止损反手回测是跨标的换手（/api/backtest?tf=sr5&pair=下方标的）：两条腿各看自己的均线，共用这 10 万。
+     买入：该标的当根 MA5 站在 MA85 上方、K 柱实体底（开收较低者，不含影线）也在 MA85 上方、收盘价站回 MA5 之上、且收盘价在 MA20 上方 → 当根收盘价买 1 万；没掉下去就下一根再加 1 万，现金不够一笔就停手。
+     卖出：持仓标的当天收盘价跌破它自己的 MA20 或 MA85 任意一条（两条线并存，先破哪条算哪条）→ 当根收盘一次全平，当根不再买回。
+     卖出后价格没重新站回 MA20 上方（下降通道未修复）就一直不买回，站回去才恢复逐根加仓。
+     资金口径两档（两个按钮，判据完全相同）：①「止损反手」= 每根最多买 1 万、趋势没坏就逐根加仓（full=false）；
+     ②「全额策略」= 一次把可用资金全额买入、卖出一次性全额卖出，不逐根加仓（full=true，后端 bt_run_pair 的 full 参数）。
+     A 腿（上方标的）的 B/S 画上图，B 腿（下方标的）的 B/S 画下图且统一蓝色。 -->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg-page: #121317;
+    --bg-card: #1c1f24;
+    --bg-soft: #262a30;
+    --bg-accent-weak: rgba(249,149,2,.12);
+    --bd-1: 1px solid #3a3f47;
+    --bd-2: 1px solid #2b2f36;
+    --tx-1: #e6e8ec;
+    --tx-2: #b0b4bc;
+    --tx-4: #8a9099;
+    --tx-6: #6b717a;
+    --amber: #e8b04a;
+    --up: #ff5f5f;
+    --dn: #2fcf98;
+    --sh-card: 0 1px 4px rgba(0,0,0,.5);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg-page);
+    color: var(--tx-1);
+    font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .sp-top {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px;
+    background: var(--bg-card);
+    border-bottom: var(--bd-2);
+  }
+  .sp-title { font-size: 15px; font-weight: 600; color: var(--amber); }
+  .sp-sub { color: var(--tx-4); font-size: 12px; }
+  .sp-top .sp-right { margin-left: auto; display: flex; gap: 8px; }
+  .sp-btn {
+    background: var(--bg-soft); color: var(--tx-1);
+    border: var(--bd-1); border-radius: 5px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer;
+    text-decoration: none;
+  }
+  .sp-btn:hover { background: var(--bg-accent-weak); border-color: var(--tx-6); }
+  /* 整页铺满视窗：卡片与图表吃掉下方剩余高度，不留下大片空白 */
+  .sp-body { padding: 16px; flex: 1; min-height: 0; display: flex; }
+  .sp-card {
+    background: var(--bg-card);
+    border: var(--bd-2);
+    border-radius: 6px;
+    box-shadow: var(--sh-card);
+    padding: 18px 20px;
+    flex: 1; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  /* ---- 头部：两组标的 + 时间范围 + 止损反手 ---- */
+  .kc-head { display: flex; align-items: center; gap: 12px 30px; flex-wrap: wrap; margin-bottom: 10px; padding-bottom: 14px; border-bottom: var(--bd-2); }
+  .kc-sl { display: flex; align-items: center; gap: 9px; position: relative; }
+  .kc-tag { font-size: 13px; color: var(--tx-4); }
+  .kc-code {
+    width: 104px; background: var(--bg-soft); color: var(--tx-1);
+    border: var(--bd-1); border-radius: 4px; padding: 4px 9px;
+    font: 14px/1.4 ui-monospace, Consolas, monospace;
+  }
+  .kc-code:focus { outline: none; border-color: var(--amber); }
+  /* 标的选择器的候选下拉：绝对定位于 .kc-sl 下方，悬停/键盘高亮同一套选样式 */
+  .kc-drop {
+    position: absolute; top: calc(100% + 4px); left: 26px; z-index: 30;
+    min-width: 230px; max-height: 260px; overflow: auto;
+    background: var(--bg-card); border: var(--bd-1); border-radius: 6px;
+    box-shadow: var(--sh-card); padding: 3px;
+  }
+  .kc-drop[hidden] { display: none; }
+  /* 列表分组标题：与真实候选区分开，一眼看出这批是“最近搜过”的 */
+  .kc-drop .hd { padding: 3px 8px 4px; color: var(--tx-6); font-size: 11px; letter-spacing: .5px; }
+  .kc-drop .it { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+  .kc-drop .it:hover, .kc-drop .it.sel { background: var(--bg-accent-weak); }
+  .kc-drop .it .nm { flex: 1; min-width: 0; color: var(--tx-1); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kc-drop .it .cd { color: var(--tx-4); font: 12px/1.4 ui-monospace, Consolas, monospace; }
+  .kc-drop .empty { padding: 6px 8px; color: var(--tx-6); font-size: 12px; }
+  .kc-name { font-size: 17px; font-weight: 600; }
+  .kc-px { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kc-chg { font-size: 14px; font-variant-numeric: tabular-nums; }
+  .kc-range { display: flex; align-items: center; gap: 8px; }
+  .kc-range input {
+    background: var(--bg-soft); color: var(--tx-2);
+    border: var(--bd-1); border-radius: 4px; padding: 3px 7px;
+    font: 13px/1.4 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .kc-range input:focus { outline: none; border-color: var(--amber); }
+  .kc-clr {
+    background: transparent; color: var(--tx-4); border: 0;
+    font-size: 13px; cursor: pointer; padding: 2px 4px;
+  }
+  .kc-clr:hover { color: var(--amber); }
+  .kc-tabs { display: flex; gap: 6px; }
+  .kc-tab {
+    background: var(--bg-soft); color: var(--tx-2);
+    border: var(--bd-1); border-radius: 4px;
+    padding: 4px 11px; font-size: 13px; cursor: pointer;
+  }
+  .kc-tab:hover { border-color: var(--tx-6); }
+  .kc-tab.on { background: var(--bg-accent-weak); border-color: var(--amber); color: var(--amber); }
+  /* 第二行：左边图例（MA3/MA20/MA85 + 买卖点，点击可隐藏），右边周期按钮 */
+  .kc-row2 { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .kc-row2 .kc-tabs { margin-left: auto; }
+  .kc-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 13px; color: var(--tx-4); }
+  .kc-lg { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .kc-lg i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  .kc-lg.off { opacity: .35; }
+  .kc-lg:hover { color: var(--tx-1); }
+  /* 标题与 K 线彻底分开：标题是图表容器之外的独立 div（兄弟节点，绝对定位浮在画布上方），不再画进 canvas */
+  .kc-plot { position: relative; flex: 1; min-height: 320px; display: flex; }
+  .kc-plot[hidden] { display: none; }
+  .kc-chart { flex: 1; min-width: 0; min-height: 0; }
+  .kc-titles { position: absolute; inset: 0; pointer-events: none; }
+  .kc-title {
+    position: absolute; left: 0; max-width: calc(100% - 58px);
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    padding: 3px 7px; border-radius: 4px;
+    line-height: 21px;          /* 锁死行高：标题盒高恒为 27px，下面按它算 20px 间距 */
+    background: rgba(28,31,36,.86);
+    font-size: 14px; color: var(--tx-4);
+  }
+  .kc-title .nm { font-size: 15px; color: var(--tx-1); font-weight: 600; }
+  .kc-title .up { color: var(--up); }
+  .kc-title .dn { color: var(--dn); }
+  /* 标题 A：盒顶 0、盒高 27px，与 grid 顶 47px 之间留 20px；
+     标题 B：夹在上图底与下图顶之间 59px 的留白带里，上方 20px、下方 12px（盒高 27px），top 由 layoutTitles() 按像素算，CSS 这里只是兜底 */
+  #ttlA { top: 0; }
+  #ttlB { top: calc(52% - 39px); }
+  .kc-tip { min-height: 20px; color: var(--tx-4); font-size: 13px; margin-top: 10px; }
+  .kc-tip.err { color: var(--up); }
+  /* ---- 止损反手回测 ---- */
+  .kc-srbtn {
+    background: var(--bg-soft); color: var(--tx-2);
+    border: var(--bd-1); border-radius: 4px;
+    padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    margin-left: auto;
+  }
+  .kc-srbtn:hover { border-color: var(--tx-6); }
+  /* 两个模式按钮并排靠右：靠左的吃掉 auto 外边距，靠右的只留 8px 间隔 */
+  .kc-srbtn + .kc-srbtn { margin-left: 8px; }
+  .kc-srbtn.on { background: var(--bg-accent-weak); border-color: var(--amber); color: var(--amber); }
+  .kc-stat {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 26px;
+    margin-bottom: 14px; padding-bottom: 12px; border-bottom: var(--bd-2);
+    font-size: 15px; color: var(--tx-4);
+  }
+  .kc-stat b { margin-left: 7px; font-size: 17px; color: var(--tx-1); font-variant-numeric: tabular-nums; }
+  /* 口径说明是附注，不能跟汇总数字抢眼：同样缩回小字 */
+  .kc-stat .lg { font-size: 12px; color: var(--tx-6); }
+  .kc-stat b.up { color: var(--up); }
+  .kc-stat b.dn { color: var(--dn); }
+  .kc-stat b.sh { color: #2f80ed; }   /* 空头腿 */
+  .kc-stat .lg { color: var(--tx-2); }
+</style>
+</head>
+<body>
+  <div class="sp-top">
+    <span class="sp-title">策略</span>
+    <span class="sp-sub">双标的分钟K · 独立页 · 选股版</span>
+    <span class="sp-right">
+      <button class="sp-btn" onClick="window.close()">关闭</button>
+      <a class="sp-btn" href="/">返回看盘</a>
+    </span>
+  </div>
+
+  <div class="sp-body">
+    <div class="sp-card">
+      <div class="kc-head">
+        <span class="kc-sl">
+          <span class="kc-tag">上</span>
+          <input class="kc-code" id="symA" value="usSOXL" spellcheck="false" placeholder="搜名称/代码"
+                 title="上方标的：输入名称或代码即时搜索（美股/港股/A股都可），点候选或回车选中；也可直接手打 usSOXL / hk00700" />
+          <div class="kc-drop" id="dropA" hidden></div>
+          <span class="kc-name" id="nameA">-</span>
+          <span class="kc-px" id="pxA">-</span>
+          <span class="kc-chg" id="chgA"></span>
+        </span>
+        <span class="kc-sl">
+          <span class="kc-tag">下</span>
+          <input class="kc-code" id="symB" value="usSOXS" spellcheck="false" placeholder="搜名称/代码"
+                 title="下方标的：输入名称或代码即时搜索（美股/港股/A股都可），点候选或回车选中；也可直接手打 usSOXS / hk09988" />
+          <div class="kc-drop" id="dropB" hidden></div>
+          <span class="kc-name" id="nameB">-</span>
+          <span class="kc-px" id="pxB">-</span>
+          <span class="kc-chg" id="chgB"></span>
+        </span>
+        <span class="kc-range">
+          <span class="kc-tag">时间范围</span>
+          <input type="date" id="dstart" title="开始日期" />
+          <span class="kc-tag">→</span>
+          <input type="date" id="dend" title="结束日期" />
+          <button class="kc-clr" id="dclr" title="清除时间范围">清除</button>
+        </span>
+        <button class="kc-srbtn" id="kc-full" title="全额策略：判据与「止损反手」完全一致，只换资金口径——买入时一次把可用资金全额买入（不再每根买 1 万），卖出时仍一次性全额卖出；换向时全部转仓。成本按单边 0.05% 扣。">全额策略</button>
+        <button class="kc-srbtn" id="kc-sr" title="止损反手回测（跨标的）：先确定上下标的与时间范围，点此才加载下方图表；两条腿各看自己的 MA5/MA20/MA85，共用 10 万本金。买入：该标的当根 MA5 站上 MA85、K 柱实体底也在 MA85 上方、收盘价站回 MA5 之上、且收盘价在 MA20 上方才买 1 万，没掉下去就每根再加 1 万，最多加到 10 万；两边都满足时比乖离取强的。卖出：持仓标的收盘价跌破它自己的 MA20 或 MA85（两条线并存，先破哪条算哪条）就当根全部卖出，当根不再买回；卖掉后价格没重新站回 MA20 上方就一直不买回（下降通道不接）。成本按单边 0.05% 扣。">止损反手</button>
+      </div>
+      <div class="kc-stat" id="kc-stat"></div>
+      <div class="kc-row2">
+        <span class="kc-legend" id="kc-legend"></span>
+        <span class="kc-tabs" id="kc-tabs"></span>
+      </div>
+      <div class="kc-plot" id="kc-plot" hidden>
+        <div class="kc-chart" id="kc-chart"></div>
+        <div class="kc-titles">
+          <div class="kc-title" id="ttlA"></div>
+          <div class="kc-title" id="ttlB"></div>
+        </div>
+      </div>
+      <div class="kc-tip" id="kc-tip">请先确定上/下标的与时间范围，再点「止损反手」（每根 1 万）或「全额策略」（一次满仓）加载图表</div>
+    </div>
+  </div>
+
+<script src="vendor/echarts.min.js"></script>
+<script>
+// 名称表只用于标题显示：不在表里的代码直接显示代码本身
+const NAMES = { usSOXL: "三倍做多半导体", usSOXS: "三倍做空半导体", hk00700: "腾讯控股", hk09988: "阿里巴巴-W" };
+const PERIODS = [["m1", "1分"], ["m5", "5分"], ["m15", "15分"], ["m30", "30分"], ["m60", "60分"], ["day", "日"]];
+// 图上只画 MA3/MA20/MA85：MA85 就是回测买卖判据用的慢线（后端 bt_run_pair 的 SR_MA_SLOW），画出来与成交点对齐；
+// MA5 仍是判据快线（SR_MA_FAST）但不画线（用户要求删掉这条），MA125 已按用户「以 85 日线为准」的口径取消
+const MA_COLOR = { ma3: "#ffd166", ma20: "#ff7ab6", ma85: "#b48ef7" };
+const COL = { up: "#ff5f5f", dn: "#2fcf98", tx: "#8a9099", bd: "#2b2f36", bg: "#1c1f24" };
+
+// 双击 HTML（file://）或非 8000 端口的本地预览时指向本机后端；经 uvicorn 托管打开时用同源相对路径
+const API_BASE = (location.protocol === "file:" ||
+  ((location.hostname === "127.0.0.1" || location.hostname === "localhost") && location.port !== "8000"))
+  ? "http://127.0.0.1:8000" : "";
+
+let period = "m1";   // 默认 1 分钟档
+let dstart = "", dend = "";   // 时间范围（YYYY-MM-DD，空=不限）
+let autoRange = true;          // 时间范围是否仍是自动档（按周期默认：m1 近 2 个交易日、其余近 5 个）；用户手改日期后置 false，不再自动覆盖
+let chart = null;
+let A = { sym: "usSOXL", name: "", rows: [], ind: {} };   // 上图标的（name=候选里带出来的中文名）
+let B = { sym: "usSOXS", name: "", rows: [], ind: {} };   // 下图标的
+
+// 标的选择器的搜索状态：每个框各自一份候选与高亮下标，防抖定时器也各自一份；
+// q=当前候选对应当的输入值，点击时拿它和输入框现值比对，防旧列表被误点进去
+// mode="recent" 表示这批是“最近搜过的标的”，不是按关键字搜出来的候选（列表顶部会带标题）
+const dropSt = { A: { items: [], idx: -1, t: 0, q: "", mode: "" }, B: { items: [], idx: -1, t: 0, q: "", mode: "" } };
+const SEARCH_DEB = 300;   // 输入防抖：与看盘页搜索同口径
+// 最近搜过的标的：进程内先缓存一份，选完立即插到最前（下次聚焦立刻可见），落库走后端 /api/recent
+let recentCache = { items: [], ts: 0 };
+const RECENT_N = 8;       // 下拉里最多列几条历史
+
+// ---- 止损反手 v13（2026-11-02）：买点 = 该标的 MA5 站上 MA85 + 实体底高于 MA85 + 收盘站上 MA5 + 收盘站上 MA20；卖点 = K 柱跌破 MA20 或 MA85。卖后未站回 MA20 就不买回 ----
+// 加载开关：初始关闭，打开页面不取数也不画图；必须先选好上下标的与起止日期、再点「止损反手」才显示下方图表
+let srOn = false;
+let srFull = false;   // 资金口径：false = 每根 1 万逐根加仓（「止损反手」）；true = 一次全额买入、全额卖出（「全额策略」）
+let sr = null;      // /api/backtest 返回的 {trades, nav, stats, klines, ind}；null=未取到
+let srErr = "";     // 回测失败原因（只影响统计条，不影响 K 线渲染）
+let keepTip = "";   // 自动兜底时写下的说明：成功路径不能像往常那样把 kc-tip 清空，否则用户不知道日期被换过
+// 回测取数根数与后端 SR_LIMITS 保持一致：m5 上游单次上限最低（超 480 回落 320）故卡 660，其余 676（+预热=800）；
+// m1 同样 676（cnt=800 实测稳定）：配合默认近 2 个交易日，足够盖住 A股约 480 根 / 美股约 782 根 / 港股约 664 根
+const SR_LIMIT = { m1: 676, m5: 660, m15: 676, m30: 676, m60: 676, day: 400 };
+// 时间范围自动档的默认跨度：分钟档一律最近 2 个交易日（上游分钟K历史很短，2 天最稳）；
+// 「日」档要看日线趋势就得给足，取最近 180 个交易日（约 9 个月，足有 MA85 预热与成规模的交易）
+const RANGE_DAYS = 2;
+const DAY_RANGE = 180;
+const rangeDays = () => (period === "day" ? DAY_RANGE : RANGE_DAYS);
+const COL_SHORT = "#2f80ed";   // 空头腿统一用蓝色，与多头红绿区分
+const SR_NAME = { lo: "开多", lc: "平多", so: "开空", sc: "平空", bo: "买反向", bc: "卖反向" };
+const tsKey = v => String(v).replace(/[-:\s]/g, "");   // "2026-10-30 16:00" 与 "202610301600" 统一成紧凑串
+// 金额格式：千分位 + 两位小数，正数带 +（盈利为负时保留负号）
+const money = v => `${(v || 0) >= 0 ? "+" : ""}${(v || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const $ = id => document.getElementById(id);
+
+function tip(msg, err) {
+  $("kc-tip").className = err ? "kc-tip err" : "kc-tip";
+  $("kc-tip").textContent = msg;
+}
+
+// 兜底：任何未捕获的脚本错误都写到提示条上——否则点了按钮毫无反应时看不出问题在哪
+window.addEventListener("error", e => {
+  const el = $("kc-tip");
+  if (el) {
+    el.className = "kc-tip err";
+    el.textContent = `页面脚本错误：${e.message}（第 ${e.lineno} 行）`;
+  }
+});
+
+// 图表容器初始是 hidden，等点按钮显示后再 init，避免 echarts 量到 0 宽高；
+// 没有尺寸时返回 null（不强行 init），由调用方决定重试
+function ensureChart() {
+  const el = $("kc-chart");
+  if (!el) return null;
+  if (!chart) {
+    if (!el.clientWidth || !el.clientHeight) return null;
+    chart = echarts.init(el, null, { renderer: "canvas" });
+  } else {
+    chart.resize();
+  }
+  return chart;
+}
+
+// 取数超时兜底：任一请求挂住都会让 Promise.all 永远不返回，页面上就只剩「加载中」
+// 超时后主动报错，至少能让统计条给出结论而不是干等
+const withTimeout = (p, ms, msg) => Promise.race([
+  p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms)),
+]);
+
+async function getJSON(url, retry = 1) {
+  let r;
+  try {
+    r = await fetch(API_BASE + url);
+  } catch (e) {  // 页面多个请求排队时可能复用后端已关掉的 keep-alive 连接（Failed to fetch），重试一次即可
+    if (retry > 0) return getJSON(url, retry - 1);
+    throw e;
+  }
+  const d = await r.json();
+  if (d.error || d.detail) throw new Error(d.error || d.detail);
+  return d;
+}
+
+// 后端分钟K时间统一是 12 位紧凑串（202610301600）：轴上转成 10-30 16:00，跨日一目了然
+function fmtTs(s) {
+  if (!s) return s;
+  if (s.length === 12) return `${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(8, 10)}:${s.slice(10, 12)}`;
+  if (s.length === 10) return s.slice(5);   // 「日」档：2026-10-30 → 10-30（年占宽度、坐标轴放不下）
+  return s;
+}
+
+// 两个标的的时间不一定完全一致（停牌/上市日不同）：类目取并集，各自按时间对齐，缺根置 null
+function align() {
+  const cats = [...new Set([...A.rows.map(r => r[0]), ...B.rows.map(r => r[0])])].sort();
+  const at = {};
+  cats.forEach((c, i) => { at[c] = i; });
+  const fill = (rows, f) => { const a = cats.map(() => null); rows.forEach(r => { a[at[r[0]]] = f(r); }); return a; };
+  return { cats, at, fill };
+}
+
+function spanOf(rows, ind) {
+  let lo = Infinity, hi = -Infinity;
+  rows.forEach(r => { const l = +r[4], h = +r[3]; if (l < lo) lo = l; if (h < hi) hi = h; });
+  // 长均线含窗口外预热价，Y 轴须并入，防止均线被上下边缘裁掉
+  Object.keys(MA_COLOR).forEach(key => (ind[key] || []).forEach(v => {
+    if (v == null) return;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }));
+  if (!(hi > lo)) { lo = (lo || 1) * 0.999; hi = (hi || 1) * 1.001; }
+  return [lo, hi];
+}
+
+const baseOf = rows => rows.length > 1 ? +rows[rows.length - 2][2] : (+((rows[0] || [])[2]) || 1);
+
+// 标题移出图表：改为图表容器之外的独立 DOM 盒子（#ttlA / #ttlB），内容口径与原先图内标题一致。
+// 每个标的的盈利段来自后端 stats.pnl_a / pnl_b：该腿（本金一半）期末总资产 - 该腿本金，两腿之和恒等于策略总盈利。
+function titleHTML(t, pnl, ret, real, flt) {
+  const c = v => ((v || 0) >= 0 ? "up" : "dn");
+  let s = `<span class="nm">${t.sym} ${NAMES[t.sym] || ""}</span>`;
+  if (sr && sr.stats && pnl != null) {
+    s += `　盈利 <span class="${c(pnl)}">${money(pnl)}</span>`
+      + `　收益率 <span class="${c(ret)}">${money(ret)}%</span>`
+      + `　已实现 ${money(real)}　浮动 ${money(flt)}`;
+  }
+  return s;
+}
+
+// 两图之间的留白带恒为 59px：标题盒 27px + 上方 20px + 下方 12px，不随窗口高度漂移
+const TTL_H = 27, GAP_BEFORE_TTL = 20, GAP_AFTER_TTL = 12;
+const BAND_H = GAP_BEFORE_TTL + TTL_H + GAP_AFTER_TTL;   // 59
+const BOTTOM_RATIO = 0.92;                                // 下图底边线，余下 8% 给日期轴与滑块
+const plotH = () => $("kc-chart").clientHeight || $("kc-plot").clientHeight || 640;
+
+function grids() {
+  const H = plotH();
+  const top0 = 47;                                        // 标题 A 盒 27px + 20px 间距
+  const bottom = Math.max(top0 + 360 + BAND_H, Math.round(H * BOTTOM_RATIO));
+  const unit = (bottom - top0 - BAND_H) / 2;              // 每个标的分到的总高：K 线 + 紧贴的 MACD 副图
+  const hM = Math.max(44, Math.round(unit * 0.26));       // MACD 副图高度
+  const hK = Math.max(80, Math.round(unit) - hM);         // K 线主图高度
+  const top1 = top0 + hK;                                 // A 的 MACD 紧贴 A 的 K 线底部（无缝）
+  const top2 = top1 + hM + BAND_H;                        // B 的 K 线（中间隔着 59px 标题带）
+  const top3 = top2 + hK;                                 // B 的 MACD
+  return [
+    { left: 58, right: 58, top: top0, height: hK },
+    { left: 58, right: 58, top: top1, height: hM },
+    { left: 58, right: 58, top: top2, height: hK },
+    { left: 58, right: 58, top: top3, height: hM },
+  ];
+}
+
+// 标题 B 浮在图外：盒底距下图 K 线 grid 顶 12px，盒顶自然落在上图 MACD 底往上 20px 处
+function layoutTitles() {
+  const g = grids();
+  $("ttlB").style.top = (g[2].top - GAP_AFTER_TTL - TTL_H) + "px";
+}
+
+function renderTitles() {
+  const st = (sr && sr.stats) || {};
+  $("ttlA").innerHTML = titleHTML(A, st.pnl_a, st.ret_a, st.realized_a, st.float_a);
+  $("ttlB").innerHTML = titleHTML(B, st.pnl_b, st.ret_b, st.realized_b, st.float_b);
+}
+
+function opt() {
+  const { cats, at, fill } = align();
+  // ECharts 5.5 的 candlestick 不接受裸 null 数据项（getInitialData 里读 null.value 会直接抛错，整张图白屏），
+  // 两个标的的交易时段不同（港股带午休、美股连续）时并集里必然会缺根，缺根用全 null 数组占位
+  const kf = rows => fill(rows, r => [+r[1], +r[2], +r[4], +r[3]]).map(v => v || [null, null, null, null]);
+  const [aLo, aHi] = spanOf(A.rows, A.ind);
+  const [bLo, bHi] = spanOf(B.rows, B.ind);
+  const aBase = baseOf(A.rows), bBase = baseOf(B.rows);
+  const pad = (aHi - aLo) * 0.06;
+  const padB = (bHi - bLo) * 0.06;
+  // 买卖点画在 K 线外侧（最低价-pad / 最高价+pad），开回测时 Y 轴再各放宽 1.8 个 pad，
+  // 否则落在区间最高价/最低价那一根的标记会被坐标系裁掉（上下两图各按自己的价格区间放宽）
+  const aLo2 = sr ? aLo - pad * 1.8 : aLo, aHi2 = sr ? aHi + pad * 1.8 : aHi;
+  const bLo2 = sr ? bLo - padB * 1.8 : bLo, bHi2 = sr ? bHi + padB * 1.8 : bHi;
+  const aMap = new Map(A.rows.map(r => [r[0], r]));
+  const bMap = new Map(B.rows.map(r => [r[0], r]));
+  // MACD 直接用后端 /api/kline 算好的 dif/dea/macd（口径 MACD(5,10,3)、EMA 从首根起步），
+  // 与 K 线逐根等长，需按各自 rows 的时间顺序撑到 cats 并集上，缺根置 null
+  const indFill = (rows, ind, key) => {
+    const arr = ind[key] || [];
+    return fill(rows.map((r, i) => [r[0], arr[i] == null ? null : arr[i]]), x => x[1]);
+  };
+  const aMacd = { dif: indFill(A.rows, A.ind, "dif"), dea: indFill(A.rows, A.ind, "dea"), macd: indFill(A.rows, A.ind, "macd") };
+  const bMacd = { dif: indFill(B.rows, B.ind, "dif"), dea: indFill(B.rows, B.ind, "dea"), macd: indFill(B.rows, B.ind, "macd") };
+  // MACD 轴上下对称、0 轴居中：量程取三组数值的绝对值最大者留 10% 余量
+  const spanM = m => {
+    let mx = 0;
+    [m.dif, m.dea, m.macd].forEach(a => a.forEach(v => { if (v != null && Math.abs(v) > mx) mx = Math.abs(v); }));
+    return mx ? mx * 1.1 : 1;
+  };
+  const aMM = spanM(aMacd), bMM = spanM(bMacd);
+  // MACD 柱：正红负绿，与 K 线涨跌色一致
+  const macdBars = m => m.macd.map(v => v == null ? null : { value: v, itemStyle: { color: v >= 0 ? COL.up : COL.dn } });
+  // 跨标的反手：leg=A 的成交画上图、leg=B 的画下图；两图配色一致（买=红 B 朝上，卖=绿 S 朝下）
+  const marks = (leg, side) => (sr ? sr.trades.filter(t => (t.leg || "A") === leg && t.side === side) : []).map(t => {
+    const mp = leg === "B" ? bMap : aMap, pd = leg === "B" ? padB : pad;
+    const i = at[tsKey(t.date)];
+    const r = i == null ? null : mp.get(cats[i]);
+    if (!r) return null;
+    const c = side === "buy" ? COL.up : COL.dn;
+    return { value: [cats[i], side === "buy" ? +r[4] - pd : +r[3] + pd], t,
+      itemStyle: { color: c }, label: { show: true, formatter: side === "buy" ? "B" : "S", color: c } };
+  }).filter(Boolean);
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    textStyle: { color: COL.tx },
+    tooltip: {
+      trigger: "axis", axisPointer: { type: "cross" }, link: [{ xAxisIndex: "all" }],
+      backgroundColor: "rgba(28,31,36,.95)", borderColor: "#3a3f47",
+      textStyle: { color: "#e6e8ec", fontSize: 12 },
+      formatter: ps => {
+        const i = ps && ps.length ? ps[0].dataIndex : -1;
+        if (i < 0 || !cats[i]) return "";
+        let s = period === "day" ? cats[i] : fmtTs(cats[i]);   // 日档本身已是 2026-10-30，无需再截
+        [["上", A.sym, aMap], ["下", B.sym, bMap]].forEach(([tag, sym, mp]) => {
+          const r = mp.get(cats[i]);
+          if (!r) { s += `<br/><span style="color:${COL.tx}">${tag} ${sym} —</span>`; return; }
+          const chg = ((+r[2] - +r[1]) / +r[1] * 100).toFixed(2);
+          s += `<br/><span style="color:${COL.tx}">${tag} ${sym}</span>　开 ${r[1]}　高 ${r[3]}<br/>`
+            + `　低 ${r[4]}　收 ${r[2]}　涨跌 ${chg}%　量 ${fmtVol(+r[5])}`;
+        });
+        if (sr) sr.trades.filter(t => tsKey(t.date) === cats[i]).forEach(t => {  // 该根的回测成交
+          const c = t.leg === "B" ? COL_SHORT : (t.side === "buy" ? COL.up : COL.dn);
+          s += `<br/><b style="color:${c}">${t.sym || A.sym} ${SR_NAME[t.reason] || "成交"}</b> ${t.price} × ${t.qty}`;
+          if (t.realized != null) s += `　盈亏 ${t.realized >= 0 ? "+" : ""}${t.realized}`;
+        });
+        return s;
+      },
+    },
+    // 图内不再有标题：上图顶部空出 47px 横带（标题盒 27px + 20px 间距）给图外的标题 A，
+    // 两图之间留 59px 的带放标题 B（上方 20px + 盒 27px + 下方 12px）。高度全按容器像素算，不用百分比顶位，
+    // 否则 52% 这种顶位会让带高随窗口高度伸缩，标题上下间距就不再是 20 / 12。
+    grid: grids(),
+    // 四个 x 轴：上标 K / 上 MACD / 下标 K / 下 MACD，日期标签只挂最底下的 MACD 轴
+    xAxis: [
+      { type: "category", data: cats, gridIndex: 0, axisLabel: { show: false }, axisLine: { lineStyle: { color: COL.bd } } },
+      { type: "category", data: cats, gridIndex: 1, axisLabel: { show: false }, axisLine: { lineStyle: { color: COL.bd } } },
+      { type: "category", data: cats, gridIndex: 2, axisLabel: { show: false }, axisLine: { lineStyle: { color: COL.bd } } },
+      { type: "category", data: cats, gridIndex: 3, axisLabel: { color: COL.tx, fontSize: 11, hideOverlap: true, formatter: fmtTs },
+        axisLine: { lineStyle: { color: COL.bd } } },
+    ],
+    yAxis: [
+      { scale: false, min: aLo2, max: aHi2, gridIndex: 0, splitLine: { lineStyle: { color: COL.bd } },
+        axisLabel: { color: COL.tx, fontSize: 11 } },
+      { scale: false, min: aLo2, max: aHi2, gridIndex: 0, position: "right",   // 右上：上图涨跌%（与价格同 min/max 严格对齐）
+        axisLine: { show: false }, splitLine: { show: false }, axisLabel: { color: COL.tx, fontSize: 11,
+        formatter: v => ((v - aBase) / aBase * 100).toFixed(2) + "%" } },
+      // 上 MACD：上下对称、零轴居中，值不上轴标签（柱体正负自明）
+      { scale: false, min: -aMM, max: aMM, gridIndex: 1, splitNumber: 2, splitLine: { lineStyle: { color: COL.bd } },
+        axisLabel: { show: false }, axisLine: { show: false } },
+      { scale: false, min: bLo2, max: bHi2, gridIndex: 2, splitLine: { lineStyle: { color: COL.bd } },
+        axisLabel: { color: COL.tx, fontSize: 11 } },
+      { scale: false, min: bLo2, max: bHi2, gridIndex: 2, position: "right",   // 右下：下图涨跌%
+        axisLine: { show: false }, splitLine: { show: false }, axisLabel: { color: COL.tx, fontSize: 11,
+        formatter: v => ((v - bBase) / bBase * 100).toFixed(2) + "%" } },
+      { scale: false, min: -bMM, max: bMM, gridIndex: 3, splitNumber: 2, splitLine: { lineStyle: { color: COL.bd } },
+        axisLabel: { show: false }, axisLine: { show: false } },
+    ],
+    dataZoom: [
+      { type: "inside", xAxisIndex: [0, 1, 2, 3], start: period === "day" ? 0 : 70, end: 100 },   // 一个缩放器同时作用于上下四图（日档默认全览）
+      { type: "slider", xAxisIndex: [0, 1, 2, 3], bottom: 6, height: 18, borderColor: COL.bd,
+        backgroundColor: "#22262c", fillerColor: "rgba(249,149,2,.12)", showDetail: false,
+        textStyle: { color: COL.tx, fontSize: 10 } },
+    ],
+    series: [
+      { name: "K", type: "candlestick", xAxisIndex: 0, yAxisIndex: 0, data: kf(A.rows),
+        itemStyle: { color: COL.up, color0: COL.dn, borderColor: COL.up, borderColor0: COL.dn } },
+      // 均线按时间戳对齐到 cats 并集：两标的时段不同时按行号硬塞会整体错位
+      ...Object.entries(MA_COLOR).map(([key, c]) => ({ name: key.toUpperCase(), id: key.toUpperCase(), type: "line",
+        xAxisIndex: 0, yAxisIndex: 0, data: hidden.has(key.toUpperCase()) ? [] : indFill(A.rows, A.ind, key), showSymbol: false,
+        itemStyle: { color: c }, lineStyle: { width: 1, color: c } })),  // id 供图例点击按条更新
+      // 上标的 MACD 副图（grid1，紧贴上图 K 线下方）：柱体正红负绿，DIF/DEA 黄蓝两线
+      { name: "MACD", id: "MACD", type: "bar", xAxisIndex: 1, yAxisIndex: 2, barWidth: "55%", data: macdBars(aMacd) },
+      { name: "DIF", id: "DIF", type: "line", xAxisIndex: 1, yAxisIndex: 2, data: aMacd.dif, showSymbol: false,
+        lineStyle: { width: 1, color: "#ffd166" }, itemStyle: { color: "#ffd166" } },
+      { name: "DEA", id: "DEA", type: "line", xAxisIndex: 1, yAxisIndex: 2, data: aMacd.dea, showSymbol: false,
+        lineStyle: { width: 1, color: "#4cc9f0" }, itemStyle: { color: "#4cc9f0" } },
+      ...(sr ? [
+        // 止损反手买卖点：A 腿（上方标的）画上图、B 腿（下方反向标的）画下图，两图同为红 B / 绿 S
+        { name: "买", id: "买", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolSize: 11,
+          data: hidden.has("买") ? [] : marks("A", "buy"), z: 5,
+          label: { position: "bottom", fontSize: 10, fontWeight: 700 } },
+        { name: "卖", id: "卖", type: "scatter", xAxisIndex: 0, yAxisIndex: 0, symbol: "triangle", symbolRotate: 180, symbolSize: 11,
+          data: hidden.has("卖") ? [] : marks("A", "sell"), z: 5,
+          label: { position: "top", fontSize: 10, fontWeight: 700 } },
+        { name: "买B", id: "买B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolSize: 11,
+          data: hidden.has("买") ? [] : marks("B", "buy"), z: 5,
+          label: { position: "bottom", fontSize: 10, fontWeight: 700 } },
+        { name: "卖B", id: "卖B", type: "scatter", xAxisIndex: 2, yAxisIndex: 3, symbol: "triangle", symbolRotate: 180, symbolSize: 11,
+          data: hidden.has("卖") ? [] : marks("B", "sell"), z: 5,
+          label: { position: "top", fontSize: 10, fontWeight: 700 } },
+      ] : []),
+      { name: "K2", type: "candlestick", xAxisIndex: 2, yAxisIndex: 3, data: kf(B.rows),
+        itemStyle: { color: COL.up, color0: COL.dn, borderColor: COL.up, borderColor0: COL.dn } },
+      // 下图均线不进图例（名称加后缀），否则图例会被 8 条线挤满
+      ...Object.entries(MA_COLOR).map(([key, c]) => ({ name: key.toUpperCase() + "₂", type: "line",
+        xAxisIndex: 2, yAxisIndex: 3, data: indFill(B.rows, B.ind, key), showSymbol: false,
+        lineStyle: { width: 1, color: c } })),
+      // 下标的 MACD 副图（grid3）
+      { name: "MACD₂", type: "bar", xAxisIndex: 3, yAxisIndex: 5, barWidth: "55%", data: macdBars(bMacd) },
+      { name: "DIF₂", type: "line", xAxisIndex: 3, yAxisIndex: 5, data: bMacd.dif, showSymbol: false,
+        lineStyle: { width: 1, color: "#ffd166" }, itemStyle: { color: "#ffd166" } },
+      { name: "DEA₂", type: "line", xAxisIndex: 3, yAxisIndex: 5, data: bMacd.dea, showSymbol: false,
+        lineStyle: { width: 1, color: "#4cc9f0" }, itemStyle: { color: "#4cc9f0" } },
+    ],
+  };
+}
+
+function fmtVol(v) {
+  if (!isFinite(v)) return "-";
+  if (v >= 1e8) return (v / 1e8).toFixed(2) + "亿";
+  if (v >= 1e4) return (v / 1e4).toFixed(0) + "万";
+  return String(Math.round(v));
+}
+
+function headOne(t, pxId, nameId, chgId) {
+  $(nameId).textContent = t.name || NAMES[t.sym] || "";
+  const last = t.rows[t.rows.length - 1], prev = t.rows[t.rows.length - 2];
+  if (!last) { $(pxId).textContent = "-"; $(chgId).textContent = ""; return; }
+  const px = +last[2], pct = prev ? (px - +prev[2]) / +prev[2] * 100 : 0;
+  $(pxId).textContent = px.toFixed(3);
+  $(chgId).textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+  $(chgId).style.color = pct >= 0 ? COL.up : COL.dn;
+}
+
+function updateHead() {
+  headOne(A, "pxA", "nameA", "chgA");
+  headOne(B, "pxB", "nameB", "chgB");
+}
+
+function renderTabs() {
+  $("kc-tabs").innerHTML = PERIODS.map(([k, t]) =>
+    `<button class="kc-tab${k === period ? " on" : ""}" data-p="${k}">${t}</button>`).join("");
+  $("kc-tabs").querySelectorAll(".kc-tab").forEach(b => {
+    b.onclick = () => {
+      if (b.dataset.p === period) return;
+      period = b.dataset.p;
+      renderTabs();
+      // 自动档下时间范围按新周期重算默认近 2 个交易日；手选过日期就不动它
+      if (autoRange) { pickRange().then(() => { if (srOn) load(); }); return; }
+      if (srOn) load(); else tip("请先确定上/下标的与时间范围，再点「止损反手」");
+    };
+  });
+}
+
+// 图例已移出图表（与周期按钮同一行、左图例右按钮）：点击图例项隐藏/显示对应曲线。
+// 只 setOption 单条 series（按 id 匹配），不重设整个 option，否则 dataZoom 会被重置回默认视窗
+const LEG_ITEM = [["MA3", MA_COLOR.ma3], ["MA20", MA_COLOR.ma20], ["MA85", MA_COLOR.ma85]];
+const hidden = new Set();
+
+function renderLegend() {
+  const items = LEG_ITEM.concat(sr ? [["买", COL.up], ["卖", COL.dn]] : []);
+  const el = $("kc-legend");
+  el.innerHTML = items.map(([n, c]) =>
+    `<span class="kc-lg${hidden.has(n) ? " off" : ""}" data-n="${n}"><i style="background:${c}"></i>${n}</span>`).join("");
+  el.querySelectorAll(".kc-lg").forEach(b => {
+    b.onclick = () => {
+      const n = b.dataset.n;
+      if (hidden.has(n)) hidden.delete(n); else hidden.add(n);
+      if (chart) {
+        // 图例只给一项「买」/「卖」，点一下要同时收掉上图 A 腿与下图 B 腿两条散点
+        const ss = opt().series.filter(x => x.id === n || x.id === n + "B");
+        if (ss.length) chart.setOption({ series: ss });
+      }
+      renderLegend();
+    };
+  });
+}
+
+// 时间范围默认值：取当前标的日K最近 2 个交易日——日K里没有周末/节假日/停牌日，
+// 天然就是「真实有交易数据的交易日」，不用手写日历
+const isoDay = s => `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+function applyRange(s, e) {
+  dstart = s; dend = e;
+  $("dstart").value = s;
+  $("dend").value = e;
+}
+// 日K 暂时取不到（后端/上游抖动）时的兜底：从昨天起往回取最近 N 个工作日（周一~周五），
+// 当天往往还没收盘、日K 未生成，故不把今天算进去；保证打开页面输入框不留空。
+// 有日K 时永远以日K 为准，这里只是保底
+function weekdayRange() {
+  const out = [];
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - 1);
+  for (let i = 0; i < 400 && out.length < rangeDays(); i++) {   // 最多回退 400 天，防死循环（日档要数 180 个工作日）
+    const w = d.getDay();
+    if (w !== 0 && w !== 6) out.unshift(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+    d.setDate(d.getDate() - 1);
+  }
+  return out;
+}
+// 返回 true=按日K真实交易日填好；"fallback"=日K取不到、按工作日兜底；false=彻底没填上
+async function pickRange() {
+  try {
+    const d = await getJSON(`/api/kline?symbol=${A.sym}&period=day&limit=${Math.max(20, rangeDays() + 5)}`);   // 日档要取足够长的日K 才数得出 180 个交易日
+    // 只认 8 位纯数字日期：上游偶尔换格式（带秒/时间戳）时不能把非法值塞进 input[type=date]，否则浏览器显示成空
+    const ds = [...new Set((d.klines || []).map(r => String(r[0]).replace(/[-:\s]/g, "").slice(0, 8)))]
+      .filter(s => /^\d{8}$/.test(s)).sort();
+    if (ds.length) {
+      applyRange(isoDay(ds[Math.max(0, ds.length - rangeDays())]), isoDay(ds[ds.length - 1]));
+      return true;
+    }
+  } catch (e) { /* 日K取不到：落到下面的工作日兜底 */ }
+  const wk = weekdayRange();
+  if (!wk.length) return false;
+  applyRange(wk[0], wk[wk.length - 1]);
+  return "fallback";
+}
+
+// 止损反手回测：与上图同一周期、同一取数根数（后端 SR_LIMITS 同口径），失败只影响统计条不影响 K 线
+async function loadSr() {
+  if (!srOn) { sr = null; srErr = ""; return; }
+  try {
+    // save=false：策略页只是看盘不落 backtests 表，避免刷出一堆记录；pair=下方标的，后端按跨标的换手重演
+    // start/end 必传：否则统计条跑的是全量默认窗口，改时间范围只会让 K 线变而顶部指标不动
+    const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
+    sr = await getJSON(`/api/backtest?symbol=${A.sym}&tf=sr5&p=${period}&capital=100000&save=false&pair=${B.sym}&full=${srFull ? "true" : "false"}${dr}`);
+    srErr = "";
+  } catch (e) { sr = null; srErr = String(e.message || e); }
+}
+
+// 盈利数据条：累计收益/盈利/期末资金/回撤/开多开空平仓次数/胜率/回测区间
+function renderStat() {
+  const el = $("kc-stat");
+  if (!srOn) { el.innerHTML = '<span class="lg">尚未加载：请先确定上/下标的与时间范围，再点「止损反手」或「全额策略」</span>'; return; }
+  if (!sr) { el.innerHTML = `<span class="lg">止损反手回测失败：${srErr || "回测结果未返回（请重试，或换个时间范围）"}</span>`; return; }
+  const s = sr.stats || {}, sg = v => `${(v || 0) >= 0 ? "+" : ""}${(v || 0).toFixed(2)}`;
+  el.innerHTML = [
+    `<span>累计收益<b class="${(s.total || 0) >= 0 ? "up" : "dn"}">${sg(s.total)}%</b></span>`,
+    `<span>盈利<b class="${(s.pnl || 0) >= 0 ? "up" : "dn"}">${money(s.pnl)}</b></span>`,
+    `<span>期末资金<b class="${(s.total || 0) >= 0 ? "up" : "dn"}">${(s.end || 0).toFixed(2)}</b></span>`,
+    `<span>最大回撤<b class="dn">${(s.mdd || 0).toFixed(2)}%</b></span>`,
+    `<span>买${A.sym}<b class="up">${s.longs || 0}</b>次</span>`,
+    `<span>买${s.sym_b || B.sym}<b class="sh">${s.shorts || 0}</b>次</span>`,
+    `<span>换手<b>${s.flips || 0}</b>次</span>`,
+    `<span>平仓<b>${s.closes || 0}</b>次</span>`,
+    s.winrate != null ? `<span>胜率<b>${s.winrate}%</b></span>` : "",
+    `<span>原始本金<b>${(s.capital || 0).toFixed(2)}</b></span>`,   // 本金是设定值不是成绩，固定排在指标末尾
+  ].join("");
+}
+
+// allowFallback：区间内一根分钟K都取不到时，自动改用该标的最近 N 个交易日重取一次
+//（港股/美股分钟K上游只留最近几个交易日，选早了必然空区间；不自动兜底就会留下
+// 「两张图还有收益、顶部汇总却是失败」的半截状态，正是用户看到的「汇总字段全缺失」）
+async function load(allowFallback = true) {
+  if (!srOn) return;   // 未点「止损反手」不取数、不画图
+  if (allowFallback) keepTip = "";   // 用户新发起的一次加载，丢掉上一次的兜底说明
+  $("kc-tip").className = "kc-tip";
+  $("kc-tip").textContent = "加载中…";
+  $("kc-stat").innerHTML = '<span class="lg">止损反手回测加载中…</span>';
+  try {
+    const lim = SR_LIMIT[period] || 300;
+    const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
+    const ku = s => `/api/kline?symbol=${s}&period=${period}&limit=${lim}${dr}`;
+    // 两条 K 线与回测并行取：同周期同根数，标记才能与上图 K 线一一对上；
+    // 下图取数失败只退化成单图，不拖垮整页
+    const [da, db] = await Promise.all([
+      withTimeout(getJSON(ku(A.sym)), 30000, "上图K线取数超时（30s），请缩小时间范围再试"),
+      withTimeout(getJSON(ku(B.sym)).catch(() => getJSON(ku(B.sym)).catch(() => null)), 30000, "下图K线取数超时（30s），已只画上图"),
+      withTimeout(loadSr(), 30000, "回测计算超时（30s未返回），请缩小时间范围再试"),
+    ]);
+    A.rows = da.klines || [];
+    A.ind = da.ind || {};
+    B.rows = (db && db.klines) || [];
+    B.ind = (db && db.ind) || {};
+    // 空区间常见于选到了行情源不可回溯的日子（港股分钟K只留近几个交易日）：把真实原因说清楚，别再只说「取不到数据」
+    if (!A.rows.length) {
+      if (allowFallback) {
+        const asked = `${dstart} ~ ${dend}`;
+        const ok = await pickRange();   // 换成该标的日K里真实有数据的最近 N 个交易日（input 同步改写）
+        if (ok !== false && `${dstart} ~ ${dend}` !== asked) {
+          $("kc-tip").className = "kc-tip";
+          keepTip = `所选区间 ${asked} 没有分钟K数据（早于上游可回溯范围或为休市日），已自动改用最近 ${rangeDays()} 个交易日：${dstart} ~ ${dend}`;
+          $("kc-tip").textContent = keepTip;
+          return load(false);   // 只兜底一次，避免上游整体不可用时无限重试
+        }
+      }
+      renderStat();   // 先把回测结论上屏：K 线缺数据不该连累收益条
+      throw new Error("上图标的本周期暂时取不到数据（该日期可能早于分钟K可回溯范围或为休市日，改选最近 2 个交易日再试）");
+    }
+    updateHead();
+    renderTitles();
+    layoutTitles();
+    let ch = ensureChart();
+    if (!ch) {   // 容器刚显示、还没量到尺寸：等一帧再试一次
+      await new Promise(r => setTimeout(r, 80));
+      ch = ensureChart();
+    }
+    if (!ch) throw new Error("图表区域未就绪（宽度或高度为 0）");
+    ch.setOption(opt(), true);
+    renderStat();
+    renderLegend();
+    $("kc-tip").textContent = keepTip;   // 有兜底说明就留着，否则清空加载提示
+  } catch (e) {
+    $("kc-tip").className = "kc-tip err";
+    $("kc-tip").textContent = String(e.message || e);
+    // 本次失败的结论要贯穿整页：标题里的每标的盈利段一起重画（sr 为空时只剩代码与名称），
+    // 否则会出现「两张图的标的收益还在、顶部汇总却是报错」的割裂读数
+    renderTitles();
+    // K 线取不到也不能把统计条晾在「加载中」：回测本身有结论就照常显示，失败则显示后端给的原因
+    renderStat();
+  }
+}
+
+// 手打/粘贴的代码规范化：带前缀（us/hk/sh/sz）原样大写；裸代码按美股补 us；港股数字补 5 位（700 → hk00700）
+function normTyped(raw) {
+  const v = String(raw || "").trim().toLowerCase().replace(/\s+/g, "");
+  if (!v) return "";
+  const m = v.match(/^(us|hk|sh|sz)/);
+  const hasPre = m && v.length > 2;
+  const pre = hasPre ? m[1] : "us";
+  let body = (hasPre ? v.slice(2) : v).replace(/[^0-9a-z.]/g, "");
+  if (!body) return "";
+  if (pre === "hk") body = /^\d{1,5}$/.test(body) ? body.padStart(5, "0") : body.toUpperCase();
+  else if (pre === "sh" || pre === "sz") body = /^\d{1,6}$/.test(body) ? body.padStart(6, "0") : body.toUpperCase();
+  else body = body.toUpperCase();
+  return pre + body;
+}
+
+// 换代码后把该腿的名称/现价清掉：否则还挂着上一只标的的价格，看着像已经切成功
+function clearHead(key) {
+  const t = key === "A" ? A : B;
+  const ids = key === "A" ? ["nameA", "pxA", "chgA"] : ["nameB", "pxB", "chgB"];
+  $(ids[0]).textContent = t.name || NAMES[t.sym] || "";
+  $(ids[1]).textContent = "-";
+  $(ids[2]).textContent = "";
+}
+
+// 真正切标的：清取数缓存；上图换标的等于换交易日历（A股/港股/美股假期不同），
+// 自动档下按新标的重取默认天数的交易日后再生效。quiet=true 时只落地状态、由调用方统一取数
+function applyCode(key, v, quiet) {
+  const t = key === "A" ? A : B;
+  if (!v) return;
+  if (v !== t.sym) {
+    t.sym = v;
+    t.rows = []; t.ind = {};
+    clearHead(key);
+  }
+  if (quiet) return;
+  if (key === "A" && autoRange) {
+    pickRange().then(() => { if (srOn) load(); });
+    return;
+  }
+  if (srOn) load();   // 未点「止损反手」前只记下代码，不取数不画图
+}
+
+// 最近搜过的标的：60 秒内复用缓存，省一次往返；拿不到就当没有历史，不影响正常搜索
+async function loadRecent() {
+  if (Date.now() - recentCache.ts < 60000 && recentCache.ts) return recentCache.items;
+  try {
+    const d = await getJSON("/api/recent");
+    recentCache = { items: d.items || [], ts: Date.now() };
+  } catch (e) { /* 忽略：历史只是便利，不该阻断搜索 */ }
+  return recentCache.items;
+}
+
+// 记一条“最近搜过”：本地先置顶（下次聚焦立刻可见），再异步落库；失败不提示
+function rememberSym(sym, name) {
+  if (!sym) return;
+  const it = { symbol: sym, name: name || "" };
+  recentCache.items = [it, ...recentCache.items.filter(x => x.symbol !== sym)].slice(0, RECENT_N);
+  recentCache.ts = Date.now();
+  fetch(API_BASE + "/api/recent", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(it)
+  }).catch(() => {});
+}
+
+// 聚焦或清空输入时先列历史：回到刚用过的标的只需点一下；一条历史都没有就退回按当前值搜索
+async function showRecent(key) {
+  const st = dropSt[key];
+  const input = $(key === "A" ? "symA" : "symB");
+  const at = input.value.trim();   // 记下渲染时的输入值：期间改了字就不采信这份列表
+  const items = (await loadRecent()).slice(0, RECENT_N);
+  if (input.value.trim() !== at) return;
+  if (!items.length) { if (!at) { st.items = []; st.idx = -1; st.q = ""; renderDrop(key); } else searchStock(key); return; }
+  st.items = items;
+  st.idx = -1;          // 历史列表默认不高亮：回车仍按手打代码生效
+  st.mode = "recent";
+  st.q = at;
+  renderDrop(key);
+}
+
+// 候选渲染：名称 + 代码；文本一律走 textContent，防标的名称里的 & < 破坏结构
+function renderDrop(key, msg) {
+  const st = dropSt[key];
+  const el = $(key === "A" ? "dropA" : "dropB");
+  if (!st.items.length) {
+    el.innerHTML = msg ? '<div class="empty"></div>' : "";
+    el.hidden = !msg;
+    if (msg) el.firstChild.textContent = msg;
+    return;
+  }
+  const hd = st.mode === "recent" ? '<div class="hd">最近搜过</div>' : "";
+  el.innerHTML = hd + st.items.map((_, i) =>
+    `<div class="it${i === st.idx ? " sel" : ""}" data-i="${i}"><span class="nm"></span><span class="cd"></span></div>`).join("");
+  el.hidden = false;
+  el.querySelectorAll(".it").forEach((b, i) => {
+    b.querySelector(".nm").textContent = st.items[i].name || st.items[i].symbol;
+    b.querySelector(".cd").textContent = st.items[i].symbol;
+    b.onmousedown = e => {
+      e.preventDefault();   // mousedown：blur 先于 click 会把候选吞掉
+      // 列表是上一次输入的结果：输入框已经改了字就不再采信，防「点了候选却回到旧标的」
+      if ($(key === "A" ? "symA" : "symB").value.trim() !== st.q) return;
+      pickSym(key, st.items[i].symbol, st.items[i].name);
+    };
+  });
+}
+
+// 输入即搜：/api/search 同时覆盖美股/港股/A股；只采纳最后一次输入的结果，防旧响应覆盖
+async function searchStock(key) {
+  const st = dropSt[key];
+  const input = $(key === "A" ? "symA" : "symB");
+  const raw = input.value.trim();
+  if (!raw) { st.items = []; st.idx = -1; st.q = ""; st.mode = ""; renderDrop(key); return; }
+  // 带前缀的完整代码直接拿去搜会搜不到（东财只认裸代码）：查询时剥掉 us/hk/sh/sz（usSOXL → SOXL、hk00700 → 00700）
+  const q = raw.replace(/^(us|hk|sh|sz)/i, "") || raw;
+  try {
+    const d = await getJSON(`/api/search?q=${encodeURIComponent(q)}`);
+    if (raw !== input.value.trim()) return;
+    st.items = d.items || [];
+    st.idx = st.items.length ? 0 : -1;
+    st.mode = "search";
+    st.q = raw;   // 记下这批候选对应的输入值，供点击时比对
+    renderDrop(key, st.items.length ? "" : "没搜到，可直接手打代码后回车");
+  } catch (e) {
+    st.items = []; st.idx = -1; st.q = ""; st.mode = "";
+    renderDrop(key, "搜索失败，可直接手打代码后回车");
+  }
+}
+
+// 选中候选：填码与中文名、收起；选完直接就按当前资金口径出图，不再靠另一个按钮触发
+function pickSym(key, v, name) {
+  const t = key === "A" ? A : B;
+  t.name = name || "";
+  $(key === "A" ? "symA" : "symB").value = v;
+  $(key === "A" ? "dropA" : "dropB").hidden = true;
+  dropSt[key].items = []; dropSt[key].q = "";
+  // 重选同一只时 sym 不变（applyCode 不刷新头部）：名称自己补上，让用户看得出选的是哪只
+  $(key === "A" ? "nameA" : "nameB").textContent = t.name || NAMES[v] || "";
+  dropSt[key].mode = "";
+  rememberSym(v, t.name || NAMES[v] || "");   // 记进「最近搜过」，下次聚焦直接点
+  applyCode(key, v, true);   // 只落地状态
+  startSr(srFull);           // 选完即出图（日期已默认填好）
+}
+
+// 标的选择器：聚焦即列候选，输入即搜，点候选或回车选高亮项；没候选时回车按手打代码生效（裸代码按美股补 us）
+function bindCode(input, key) {
+  const st = dropSt[key];
+  const drop = () => $(key === "A" ? "dropA" : "dropB");
+  input.addEventListener("focus", () => {
+    input.select();   // 点进去即全选，直接打字就替换旧代码
+    // 一聚焦先给“最近搜过”的标的：点一下就能切回上次用的；一条历史都没有时退回按当前值搜
+    showRecent(key);
+  });
+  input.addEventListener("input", () => {
+    clearTimeout(st.t);
+    if (!input.value.trim()) { showRecent(key); return; }   // 清空输入即回落到历史列表
+    st.t = setTimeout(() => searchStock(key), SEARCH_DEB);
+  });
+  input.addEventListener("keydown", e => {
+    if (!drop().hidden && st.items.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        st.idx = (st.idx + (e.key === "ArrowDown" ? 1 : -1) + st.items.length) % st.items.length;
+        renderDrop(key);
+        return;
+      }
+      if (e.key === "Enter" && st.idx >= 0) {
+        e.preventDefault();
+        pickSym(key, st.items[st.idx].symbol, st.items[st.idx].name);
+        return;
+      }
+    }
+    if (e.key === "Escape") { drop().hidden = true; return; }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const v = normTyped(input.value);
+      if (v) { input.value = v; applyCode(key, v); rememberSym(v, NAMES[v] || ""); }
+      input.blur();
+    }
+  });
+  input.addEventListener("blur", () => {
+    // 点候选走 mousedown（已 preventDefault），不会被 blur 抢掉，所以这里可以立即收起
+    drop().hidden = true;
+    const v = normTyped(input.value);
+    if (!v) return;
+    if (v !== input.value) input.value = v;   // 粘贴的 700 / soxl 顺手规范化
+    const t = key === "A" ? A : B;
+    if (v !== t.sym) { t.name = ""; if (v) rememberSym(v, NAMES[v] || ""); }   // 手打成了另一只：旧中文名不再适用，顺手记进历史
+    applyCode(key, v);
+  });
+}
+
+// 时间范围：改完即重取（分钟K一次只能取最近约 1023 根，范围超出时后端按实际取到的首根为准）
+["dstart", "dend"].forEach(id => {
+  $(id).addEventListener("change", () => {
+    dstart = $("dstart").value || "";
+    dend = $("dend").value || "";
+    autoRange = false;   // 手动选过日期就不再被自动档覆盖
+    if (srOn) load();   // 先选好日期，等点「止损反手」再加载
+  });
+});
+$("dclr").onclick = () => {
+  if (!dstart && !dend) return;
+  autoRange = false;
+  dstart = ""; dend = ""; $("dstart").value = ""; $("dend").value = "";
+  if (!srOn) return;
+  // 起止日期是加载前提：清掉日期就收起图表，等重新选好再点按钮
+  srOn = false;
+  $("kc-sr").classList.remove("on");
+  $("kc-full").classList.remove("on");
+  $("kc-plot").hidden = true;
+  $("ttlA").innerHTML = "";
+  $("ttlB").innerHTML = "";
+  sr = null; srErr = "";
+  $("kc-stat").innerHTML = "";
+  tip("已清除时间范围：请重新选择起止日期后再点「止损反手」或「全额策略」");
+};
+
+// 两种资金口径共用的启动/重算流程：先校验上下标的与起止日期，齐全才显示下方图表
+//   full=false「止损反手」：每根最多 1 万、趋势没坏就逐根加仓
+//   full=true 「全额策略」：买入一次把可用资金全额买入，卖出仍一次性全额卖出
+async function startSr(full) {
+  // 先把两个框里的最新内容落地（不等 blur 时序）：否则手改代码后直接点按钮，跑的仍是上一个标的
+  let changed = false;
+  for (const key of ["A", "B"]) {
+    const input = $(key === "A" ? "symA" : "symB");
+    const v = normTyped(input.value);
+    if (!v) continue;
+    input.value = v;
+    $(key === "A" ? "dropA" : "dropB").hidden = true;
+    const t = key === "A" ? A : B;
+    if (v !== t.sym) { t.name = ""; changed = true; }
+    applyCode(key, v, true);   // 只落地状态，取数统一走下面的 load
+  }
+  dstart = $("dstart").value || "";
+  dend = $("dend").value || "";
+  const miss = [];
+  // 框里有字但没规范化成功（例如只打了中文没点候选）：不能静默跑旧标的，直接提示重选
+  if ($("symA").value.trim() !== A.sym) miss.push("上方标的");
+  if ($("symB").value.trim() !== B.sym) miss.push("下方标的");
+  if (!dstart) miss.push("开始日期");
+  if (!dend) miss.push("结束日期");
+  const btn = full ? "「全额策略」" : "「止损反手」";
+  if (miss.length) { tip(`请先选中${miss.join("、")}（从候选里点一只，或填完整代码回车），再点${btn}`, true); return; }
+  if (dstart > dend) { tip("开始日期不能晚于结束日期", true); return; }
+  srFull = full;
+  $("kc-full").classList.toggle("on", full);
+  $("kc-sr").classList.toggle("on", !full);
+  srOn = true;
+  $("kc-plot").hidden = false;
+  tip("加载中…");   // 先把反馈给出来：重算交易日/取数都要等接口，不能干等着像死住
+  await new Promise(r => requestAnimationFrame(() => r()));   // 等一帧：容器刚从 hidden 变可见，立即 init 容易量到 0 宽高
+  ensureChart();
+  // 换过标的才重算默认交易日（否则省下这次日K请求），重算完再用新日期取数
+  if (changed && autoRange) await pickRange();
+  dstart = $("dstart").value || dstart;
+  dend = $("dend").value || dend;
+  load();
+}
+$("kc-full").onclick = () => startSr(true);
+$("kc-sr").onclick = () => startSr(false);
+
+bindCode($("symA"), "A");
+bindCode($("symB"), "B");
+renderTabs();
+renderLegend();
+// 打开页面即把时间范围填成当前标的最近 2 个交易日，用户直接点「止损反手」就能用
+pickRange().then(ok => {
+  if (ok === true) tip(`时间范围已默认近 ${rangeDays()} 个交易日：${dstart} ~ ${dend}（按 ${A.sym} 日K的实际交易日，周末与节假日不算）`);
+  else if (ok === "fallback") tip(`日K暂时取不到，时间范围先按最近 ${rangeDays()} 个工作日填为：${dstart} ~ ${dend}（稍后重开页面会按真实交易日重算）`, true);
+});
+window.addEventListener("resize", () => {
+  if (!chart) return;
+  chart.resize();
+  layoutTitles();
+  chart.setOption({ grid: grids() });   // grid 按像素算，窗口高度变了要重算；只补 grid，别整份 setOption，否则 dataZoom 视窗会被重置
+});
+</script>
+</body>
+</html>

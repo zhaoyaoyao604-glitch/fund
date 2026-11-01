@@ -64,3 +64,29 @@ usSOXS   day 300 OK
 1. 加第四通道：日K 换成东财 `push2his.eastmoney.com/api/qt/stock/kline/get`（需先解决本机 TLS 000）。
 2. 对 `fqkline` 失败做"指数退避 + 冷却标记"，避免每次刷新都去撞已被挑战的路径。
 3. 前端在 502 时卡片显示明确文案而不是空白图（现在已有 err 文案，但 K 线区域是空画布）。
+
+## 七、港股分钟K 根数为何比 A 股少一大截（2026-11-01）
+
+现象：同一时间切到 60 分，A 股卡片能画几个月、港股卡片（如 hk07747）只有三四天。
+
+**不是 bug，是上游只给 5 个交易日。** 逐源实测（Windows 26H2，直连 `--noproxy "*"`）：
+
+| 源 | 结果 |
+|---|---|
+| 腾讯 `kline/mkline`（A 股分钟K主源） | 港股代码返回 `param error` |
+| 腾讯 `hkfqkline`（港股K线） | 只收 day/week/month，分钟周期 `bad params` |
+| 东财 `push2his` / `push2` kline（klt=60） | 连接被重置（rc=56，含 1./41. 数字前缀域与 http1.1），本机整体不可达 |
+| 腾讯 `day/query`（多日分时） | 200，`days=5`、每天 332 点（09:30~16:00），与新浪同口径 |
+| 新浪 `HK_MinlineService.getMinline` | 200，`days=5`、每天 332 点（带 prevclose） |
+| 新浪 `HK_KLineService` / 逐笔 `HK_TransactionsService` | `Service not valid`（已下线） |
+| Yahoo chart / 同花顺 `d.10jqka` / aastocks | 全部空响应（境内不可达） |
+
+### 现在的做法（`server/main.py`）
+
+1. `_hk_min_points()`：新浪分时 ∪ 腾讯多日分时。新浪带 `prevclose`（首桶开盘最准），腾讯收盘后能补到最后 16:00 那根（纯新浪会停在盘中最后一笔，实测 14:31）。
+2. `_hkmin_sync()`：把 1 分钟点 upsert 进 `server/hkmin.db`（表 `hkmin`，主键 `sym+date+hm`），保留最近 420 个交易日。
+3. `sina_hk_min_kline()`：按 `limit+MA_WARM` 反推需要几天（m5 66 / m15 22 / m30 11 / m60 6 根每天），从库里取出来聚合成 m5/m15/m30/m60。
+
+效果：首次运行仍只有 5 天（上游上限），**每多看一天盘，库就多一天，根数与均线预热随之变长**；`/api/kline` 额外返回 `hk_min_days`，卡片底部据此显示「本地已累积 N 天」。
+
+验证：hk07747 四周期 m5 300 根 / m15 110 / m30 55 / m60 30（末根 202610301600，尾盘已补齐）；人为插入一天历史后 m60 由 30 → 37 根、`hk_min_days` 5 → 6，确认累积路径生效。

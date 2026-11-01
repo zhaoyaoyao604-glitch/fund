@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 
 # 运行时产物（本地数据库 / 进程文件）
+server/*.db
+server/*.db-*
+/server/*.db
 server/cards.db*
 /cards.db
 *.pid

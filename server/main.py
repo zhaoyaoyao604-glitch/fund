@@ -33,11 +33,29 @@ EM_SECID = {"sh": "1.", "sz": "0.", "hk": "116."}  # 东财市场号：沪/深/�
 EM_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # 东财网页端公开 token
 QT = "https://qt.gtimg.cn/q="  # 腾讯实时报价（GBK文本），美股补当日活动K线用
 SINA_US_DAILY = "https://stock.finance.sina.com.cn/usstock/api/jsonp_v2.php/var%20_t=/US_MinKService.getDailyK"  # 新浪美股日K全历史（不复权）
+# 新浪美股分钟K（不复权）独走此源：腾讯 mkline 不接受 us 代码（返回 param error），东财 push2his 又被 CDN 掐 Python 客户端。
+# type=分钟粒度，一次固定返回最近约 1023 根，时间戳为美东交易所时间（09:30~16:00）
+SINA_US_MINK = "https://stock.finance.sina.com.cn/usstock/api/jsonp_v2.php/var%20_t=/US_MinKService.getMinK"
+# type=1（1 分钟）：实测 sin a 一次给 1023 根 ≈ 最近 2.6 个交易日（美股每天约 391 根）
+US_MIN_TYPE = {"m1": 1, "m5": 5, "m15": 15, "m30": 30, "m60": 60}
 EM_TRENDS = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"  # 东财分时（美股）
 SINA_A_KLINE = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"  # 新浪A股K线兜底（不复权）
 SINA_HK_KLINE = "https://finance.sina.com.cn/stock/hkstock/{}/klc2_kl.js"  # 新浪港股全历史日K（K2 加密格式，node 解密，不复权）
+# 新浪港股分时（1分钟粒度，一次给最近 5 个交易日）：港股分钟K在腾讯 mkline（param error）与东财
+# push2his（本机 000 / push2 返回 dktotal=0）都拿不到，只能由这份 1 分钟数据本地聚合成 m5/m15/m30/m60
+SINA_HK_MIN = "https://quotes.sina.cn/hk/api/openapi.php/HK_MinlineService.getMinline?symbol={}"
+# 腾讯港股多日分时（同为最近 5 个交易日、每天 332 点，但当日收盘后比新浪先补齐）：新浪分时失败时顶替
+TENCENT_HK_DAY = "https://web.ifzq.gtimg.cn/appstock/app/day/query?code=hk{}"
+# 港股 1 分钟归档库：上游所有免费源（新浪分时/腾讯多日分时）都只给最近 5 个交易日，港股分钟K 想画出
+# 和 A 股一样长的历史只能靠本地逐日累积——每跑一天归档多一天，m5/m15/m30/m60 的根数随之增长
+HK_MIN_DB = Path(__file__).resolve().parent / "hkmin.db"
+# 每个交易日聚合出的根数（港股 09:30~12:00 / 13:00~16:00 两段各按间隔分桶）：m5 66 / m15 22 / m30 11 / m60 6；
+# m1 不聚合，直接取上游 1 分钟点，每天 332 点（09:30 首点 + 每分钟一桶）
+HK_BARS_PER_DAY = {"m1": 332, "m5": 66, "m15": 22, "m30": 11, "m60": 6}
+HK_MIN_KEEP = 420  # 每标的保留交易日上限：m60 每天 6 根，420 天 ≈ 2500 根，远超 424 根预热需求
 DAY_PERIODS = {"day", "week", "month"}
-MIN_PERIODS = {"m5", "m15", "m30", "m60"}
+# m1：A股走腾讯 mkline（cnt=800 实测正常返回 800 根，约 3.3 个交易日）；美股走新浪 type=1；港股取上游 1 分钟点不聚合
+MIN_PERIODS = {"m1", "m5", "m15", "m30", "m60"}
 TS_FMT = "%Y-%m-%d %H:%M"  # 订单时间戳统一成定长格式，SQL 里 ORDER BY ts 字典序即时间序
 
 # ---------- 卡片列表持久化：SQLite（前端增/删/排序/周期变化均整体回写） ----------
@@ -108,10 +126,21 @@ def _init_db():
                         "name TEXT NOT NULL, side TEXT NOT NULL CHECK(side IN ('buy','sell')), "
                         "price REAL NOT NULL CHECK(price > 0), qty REAL NOT NULL CHECK(qty > 0), "
                         "ts TEXT NOT NULL)")
+    # 迁移：cards/cards_live 补 pair 列（配对标的代码）——非空时前端把该卡渲染成上下双图：
+    # 上=本卡标的、下=pair 标的，两图共用一根横轴与一个缩放条；空串=普通单标的卡
+    for t in ("cards", "cards_live"):
+        if "pair" not in [r["name"] for r in con.execute(f"PRAGMA table_info({t})")]:
+            with con:
+                con.execute(f"ALTER TABLE {t} ADD COLUMN pair TEXT NOT NULL DEFAULT ''")
     # 界面偏好表（key-value）：所在页/日期筛选等跨浏览器共享的 UI 偏好，跟库走不跟某个浏览器的 localStorage 走
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prefs'").fetchone():
         with con:
             con.execute("CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    # 最近搜过的标的：筛选框聚焦时直接列出来供点选；两个框共用一份，按最近一次选中时间倒序
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recent_sym'").fetchone():
+        with con:
+            con.execute("CREATE TABLE recent_sym (symbol TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', "
+                        "ts TEXT NOT NULL)")
     # 买入次日卡片前置的每日游标：scope(hist/live) -> 上次执行日 YYYY-MM-DD
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promo'").fetchone():
         with con:
@@ -347,6 +376,10 @@ app.add_middleware(
 
 _CACHE = {}
 TTL = 30  # 秒：同 URL 30 秒内走内存。防止刷新页面 37 卡并发连击上游触发腾讯 WAF 风控
+# 顶部信号条的全量扫描结果：几十只票逐个拉日K，比单次取数贵得多，单独给一份长缓存
+HEAT_TTL = 180  # 秒
+_HEAT = {"t": 0.0, "d": None}
+_HEAT_LOCK = asyncio.Lock()
 
 
 def _ifzq_urls(url):
@@ -427,7 +460,7 @@ async def em_kline(symbol, period, cnt):
     # 东财K线兜底：ifzq/proxy 全线被 WAF 挑战时降级取数。fqt=1 前复权与腾讯 qfq 口径一致；
     # fields2=f51..f56 字段序（日期,开,收,高,低,量）与腾讯 klines 完全相同，下游零改动。
     # end=20500101+lmt=N 返回最近 N 根（带 beg 会从头数，取不到最新）。
-    klt = {"day": 101, "week": 102, "month": 103, "m5": 5, "m15": 15, "m30": 30, "m60": 60}[period]
+    klt = {"day": 101, "week": 102, "month": 103, "m1": 1, "m5": 5, "m15": 15, "m30": 30, "m60": 60}[period]
     url = (f"{EM_KLINE}?secid={_em_secid(symbol)}&ut={EM_TOKEN}"
            f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56"
            f"&klt={klt}&fqt=1&end=20500101&lmt={cnt}")
@@ -457,6 +490,9 @@ async def sina_kline(symbol, period, cnt):
     # 新浪A股K线（末级兜底，仅 sh/sz）：腾讯被 WAF 挑战 + 东财限流时仍能出图。
     # 注意新浪是不复权价，除权日附近历史K线与腾讯/东财的前复权口径会有差异（服务恢复即回到主源）
     # 周/月K用日K粒度取数后本地聚合（口径同美股 resample）
+    # 新浪最小粒度是 5 分钟（scale 传 1 拿不到 1 分钟数据），m1 档没有这道兜底，直接报错让上游链换源
+    if period == "m1":
+        raise HTTPException(502, "新浪K线兜底源不支持 1 分钟粒度")
     scale = {"day": 240, "week": 240, "month": 240, "m5": 5, "m15": 15, "m30": 30, "m60": 60}[period]
     txt = await get_text(f"{SINA_A_KLINE}?symbol={symbol}&scale={scale}&ma=no&datalen={cnt}")
     try:
@@ -487,6 +523,173 @@ async def sina_hk_kline(symbol, period, cnt):
         raise HTTPException(502, "新浪港股K线兜底源解析失败，请稍后重试")
     if period in ("week", "month"):
         rows = resample(rows, period)
+    return rows
+
+
+def _hk_bar_ts(d, hm):
+    # 分钟K时间戳 = 桶内最后一分钟（如 09:30~09:35 的 5 分钟桶 → 0935），与东财/腾讯分钟K的结束时刻口径一致
+    return d + hm
+
+
+_HK_WROTE = {}  # sym -> 上次写库时间：30 秒内重复请求（同 TTL）只读不写，避免十几张卡片同时刷新把归档库写锁撞满
+
+
+def _hkmin_sync(sym, pts, days):
+    # 把上游最近 5 个交易日的 1 分钟点 upsert 进归档库，再取回最近 days 个交易日的全量点（含历史累积）。
+    # pts 元素 = (date, hm, price, vol, prevclose)；库不可写（只读盘/被占）时抛异常，由调用方退回只用上游
+    con = sqlite3.connect(HK_MIN_DB, timeout=15)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")  # 读写共存：看盘页多卡片轮询时不能因写锁把读侧也堵住
+        # 建表不受写入节流影响（幂等 DDL）：库被删重建时仍能立刻恢复
+        con.execute("CREATE TABLE IF NOT EXISTS hkmin (sym TEXT NOT NULL, date TEXT NOT NULL, "
+                    "hm TEXT NOT NULL, price REAL NOT NULL, vol REAL NOT NULL DEFAULT 0, "
+                    "prevclose REAL NOT NULL DEFAULT 0, PRIMARY KEY (sym, date, hm))")
+        now = time.time()
+        if now - _HK_WROTE.get(sym, 0) > TTL:
+            with con:
+                con.executemany("INSERT OR REPLACE INTO hkmin (sym, date, hm, price, vol, prevclose) "
+                                "VALUES (?, ?, ?, ?, ?, ?)", [(sym,) + tuple(p) for p in pts])
+            _HK_WROTE[sym] = now
+        dates = [r[0] for r in con.execute(
+            "SELECT DISTINCT date FROM hkmin WHERE sym=? ORDER BY date DESC LIMIT ?", (sym, HK_MIN_KEEP))]
+        if not dates:
+            return []
+        keep = dates[-1]  # 保留窗口里最老的一天：只按它截断，宁可多读也不删仍要用到的历史
+        rows = con.execute("SELECT date, hm, price, vol, prevclose FROM hkmin "
+                           "WHERE sym=? AND date>=? ORDER BY date, hm", (sym, keep)).fetchall()
+        with con:
+            con.execute("DELETE FROM hkmin WHERE sym=? AND date<?", (sym, keep))
+    finally:
+        con.close()
+    win = set(dates[:days]) if days else set(dates)  # 本次只聚合要的天数，更老的继续留在库里
+    return [tuple(r) for r in rows if r[0] in win]
+
+
+def _hkmin_agg(d, pts, step):
+    # 单日 1 分钟点 → 分钟K：桶不跳午休；开=上一分钟价（当日首桶用昨收），高/低覆盖开收与桶内极值，量=桶内合计
+    out, prev = [], (pts[0][3] or pts[0][1])
+    for seg in ([p for p in pts if p[0] <= "1200"], [p for p in pts if p[0] > "1200"]):
+        n = len(seg)
+        if not n:
+            continue
+        # 分桶以「间隔」计：首点是开盘快照，之后每分钟一个间隔。首桶 = step 个间隔（step+1 个点），
+        # 余数落在段尾的短桶（如上午 09:30~12:00 × 60 分 = [61,60,30] 点 → 10:30/11:30/12:00）
+        m = n - 1
+        k, rem = (m // step, m % step) if m >= step else (0, 0)
+        sizes = ([step + 1] + [step] * (k - 1) + ([rem] if rem else [])) if k else [n]
+        i = 0
+        for size in sizes:
+            chunk, i = seg[i:i + size], i + size
+            o = prev
+            hi, lo = max(o, chunk[0][1]), min(o, chunk[0][1])
+            v = 0.0
+            for _, price, vol, _pc in chunk:
+                hi, lo, v = max(hi, price), min(lo, price), v + vol
+            out.append([_hk_bar_ts(d, chunk[-1][0]), o, chunk[-1][1], hi, lo, v])
+            prev = chunk[-1][1]  # 下一桶的开盘价 = 本桶末价
+    return out
+
+
+async def _sina_hk_points(symbol):
+    # 新浪港股分时：带 prevclose（当日首桶开盘价最准），但当日盘中/刚收盘时可能停在最后一笔分时上
+    # 该域有个别 IP 会卡到 15s 才报超时（换个连接就快）：限 6s 重试，别让首次取数卡十几秒
+    url, now, txt = SINA_HK_MIN.format(symbol[2:]), time.time(), None
+    hit = _CACHE.get(url)
+    if hit and now - hit[0] < TTL:
+        txt = hit[1]
+    for _ in range(3 if txt is None else 0):
+        try:
+            async with httpx.AsyncClient(timeout=6, headers=UA, trust_env=False) as cli:
+                txt = (await cli.get(url)).content.decode("utf-8", errors="replace")
+            if len(_CACHE) > 300:
+                _CACHE.clear()
+            _CACHE[url] = (now, txt)
+            break
+        except Exception:  # 连接超时/断流：交给腾讯多日分时补点
+            txt = None
+    pts = []
+    if not txt:
+        return pts
+    try:
+        days = (json.loads(txt).get("result") or {}).get("data") or []
+    except (ValueError, TypeError):
+        return pts
+    for day in days:
+        if not day:
+            continue
+        d = str(day[0].get("date", "")).replace("-", "")  # "2026-10-26" → "20261026"
+        pc = float(day[0].get("prevclose") or day[0]["price"])  # 当日首根的开盘参考价
+        for p in day:
+            pts.append((d, p["m"][:5].replace(":", ""), float(p["price"]),
+                        float(p["volume"] or 0), pc))  # "09:30:00" → "0930"
+    return pts
+
+
+async def _tencent_hk_points(symbol):
+    # 腾讯港股多日分时：无 prevclose（用当日首点价代开盘价），但当日收盘后能补到 16:00 最后一分钟
+    try:
+        d0 = (await get_json(TENCENT_HK_DAY.format(symbol[2:]))).get("data") or {}
+    except HTTPException:
+        return []
+    pts = []
+    for day in (((d0.get(symbol) or {}).get("data") or []) if isinstance(d0, dict) else []):
+        raw = (day or {}).get("data") or []
+        if not raw:
+            continue
+        d = str(day.get("date") or "")
+        f0 = raw[0].split()  # 点格式 "0930 0.062 0 0.000"：时间 价 量 成交额
+        pc = float(f0[1]) if len(f0) > 1 else 0.0
+        for s in raw:
+            f = s.split()
+            if len(f) >= 3:
+                pts.append((d, f[0], float(f[1]), float(f[2]), pc))
+    return pts
+
+
+async def _hk_min_points(symbol):
+    # 上游 1 分钟点 = 新浪分时 ∪ 腾讯多日分时。两家都只给最近 5 个交易日（无法绕过，要更长历史
+    # 只能靠 hkmin.db 逐日累积），但互补：新浪带 prevclose 口径正、腾讯收盘后能补到最后 16:00 那根
+    pts = await _sina_hk_points(symbol)
+    tx = await _tencent_hk_points(symbol)
+    if not pts:
+        return tx
+    if not tx:
+        return pts
+    seen, pc = {(p[0], p[1]) for p in pts}, {}
+    for d, _hm, _price, _vol, p0 in pts:
+        pc.setdefault(d, p0)
+    for d, hm, price, vol, p0 in tx:
+        if (d, hm) in seen:
+            continue
+        pc.setdefault(d, p0)
+        pts.append((d, hm, price, vol, pc[d]))
+    return pts
+
+
+async def sina_hk_min_kline(symbol, period, need=0):
+    # 港股分钟K：上游只给最近 5 个交易日 1 分钟点（新浪与腾讯同口径，东财本机不可达），故
+    # ①上游点写进本地归档库 hkmin.db ②再按 need 反推要几天，从库里取出来聚合成 m5/m15/m30/m60。
+    # 这样程序每多跑一天，港股分钟K 就多一天历史，根数逐步追平 A 股（首次运行只有 5 天，属上游上限）
+    pts = await _hk_min_points(symbol)
+    if not pts:
+        raise HTTPException(502, "港股分钟K上游无数据（新浪分时与腾讯多日分时均无返回），请稍后重试")
+    step = int(period[1:])
+    days = min(HK_MIN_KEEP, math.ceil(need / HK_BARS_PER_DAY[period]) + 2) if need else HK_MIN_KEEP
+    try:
+        arch = await asyncio.to_thread(_hkmin_sync, symbol[2:], pts, days)
+    except Exception:  # 归档不可用（只读盘/库被占）不影响出图：退回只用本次上游数据
+        arch = []
+    if not arch:
+        arch = sorted(pts)
+    by = {}
+    for d, hm, price, vol, pc in arch:
+        by.setdefault(d, []).append((hm, price, vol, pc))
+    rows = []
+    for d in sorted(by):
+        rows.extend(_hkmin_agg(d, by[d], step))
+    if not rows:
+        raise HTTPException(502, "港股分钟K上游无数据，请稍后重试")
+    rows.sort(key=lambda r: r[0])
     return rows
 
 
@@ -660,6 +863,49 @@ async def us_kline(symbol, period, limit, start, end):
     return {"symbol": symbol, "period": period, "klines": rows, "ind": ind, "tail": tail}
 
 
+async def us_min_rows(symbol, period):
+    # 新浪美股分钟K：一次只给最近约 1023 根（m5 约两周、m15 约两月、m30 约一季、m60 约半年），
+    # 不支持翻页。时间戳（美东 09:30~16:00）转成腾讯口径的 12 位紧凑串 YYYYMMDDHHMM，
+    # 与 A股/港股分钟K 在 /api/kline 输出里完全一致，前端无需分流处理
+    txt = None
+    for _ in range(2):  # 新浪偶发连接超时（实测 m30 会超时一次）：重试一次再报 502，不给前端抛 500
+        try:
+            txt = await get_text(f"{SINA_US_MINK}?symbol={symbol[2:]}&type={US_MIN_TYPE[period]}")
+            break
+        except Exception:
+            continue
+    if txt is None:
+        raise HTTPException(502, "美股分钟K源连接超时，请稍后重试")
+    try:
+        arr = json.loads(txt[txt.index("=(") + 2: txt.rindex("]") + 1])
+        # 上游时间为 "2026-10-30 15:35:00"：先截到分钟再紧凑化，得 12 位 YYYYMMDDHHMM（丢掉秒）
+        rows = [[r["d"][:16].replace("-", "").replace(" ", "").replace(":", ""),
+                r["o"], r["c"], r["h"], r["l"], r["v"]] for r in arr]  # 统一为 [时间,开,收,高,低,量]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise HTTPException(502, "美股分钟K源返回异常，请稍后重试")
+    if not rows:
+        raise HTTPException(502, "美股分钟K源返回空数据（代码有误或该标的已退市），请稍后重试")
+    return rows
+
+
+async def us_min_kline(symbol, period, limit, start, end):
+    # 美股分钟K（不复权）：指标同样先在全体取数上算（天然含预热段），再按窗口/区间切片对齐
+    raw = await us_min_rows(symbol, period)
+    ind = indicators([float(r[2]) for r in raw])
+    if start or end:
+        s, e = start.replace("-", ""), end.replace("-", "")
+        idx = [i for i, r in enumerate(raw) if (not s or r[0][:8] >= s) and (not e or r[0][:8] <= e)]
+        if idx:
+            rows, ind = raw[idx[0]:idx[-1] + 1], _ind_slice(ind, idx[0], idx[-1] + 1)
+        else:
+            rows, ind = [], {}
+    else:
+        n = len(raw)
+        rows = raw[-limit:]
+        ind = _ind_slice(ind, n - len(rows), n)
+    return {"symbol": symbol, "period": period, "klines": rows, "ind": ind, "tail": []}
+
+
 async def _em_trends(secid):
     url = (f"{EM_TRENDS}?secid={secid}&ndays=1&iscr=0&fields1=f1,f2,f3,f4,f5,f6,f7,f8"
            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58")
@@ -712,7 +958,8 @@ def ema(vals, p):
 
 
 def indicators(closes):
-    # 均线 MA3/5/85/125 + MACD(5,10,3)，与看盘软件口径一致（EMA 从首根种子起步）
+    # 均线 MA3/5/10/85/125 + MACD(5,10,3)，与看盘软件口径一致（EMA 从首根种子起步）
+    # MA20 是反手页的出场辅线（收盘跌破 MA20 或 MA85 任一即全平），MA10 保留下发供其它页面展示
     if not closes:
         return {}
     n = len(closes)
@@ -724,7 +971,7 @@ def indicators(closes):
     dif = [a - b for a, b in zip(e5, e10)]
     dea = ema(dif, 3)
     return {
-        "ma3": ma(3), "ma5": ma(5), "ma85": ma(85), "ma125": ma(125),
+        "ma3": ma(3), "ma5": ma(5), "ma10": ma(10), "ma20": ma(20), "ma85": ma(85), "ma125": ma(125),
         "dif": [round(x, 4) for x in dif],
         "dea": [round(x, 4) for x in dea],
         "macd": [round(2 * (d - e), 4) for d, e in zip(dif, dea)],
@@ -741,6 +988,12 @@ async def index():
     return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/fanshou.html")
+async def fanshou_page():
+    # 反手页：上下双标的分钟K + 跨标的止损反手回测（strategy.html 已废弃删除）
+    return FileResponse(WEB_DIR / "fanshou.html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/health")
 async def health():
     return {"ok": True, "source": "tencent-free"}
@@ -749,10 +1002,13 @@ async def health():
 @app.get("/api/kline")
 async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
                 start: str = "", end: str = ""):
+    hk_days = None  # 仅港股分钟K 赋值：实际覆盖的交易日数（日K/美股分支保持 None）
     if symbol.startswith("us"):
-        if period not in DAY_PERIODS:
-            return {"error": "美股暂不支持分钟K（5分/30分/60分），可用 分时 / 日K / 周K / 月K"}
-        return await us_kline(symbol, period, limit, start, end)
+        if period in DAY_PERIODS:
+            return await us_kline(symbol, period, limit, start, end)
+        if period in MIN_PERIODS:  # 分钟K走新浪 getMinK（腾讯 mkline 不收 us 代码）
+            return await us_min_kline(symbol, period, limit, start, end)
+        return {"error": f"period 只支持: {sorted(DAY_PERIODS | MIN_PERIODS)}"}
     if period in DAY_PERIODS:
         cnt = 800 if (start or end) else limit + MA_WARM  # 筛选态多取防目标区间落在窗口外；平时多取供均线预热
         try:
@@ -772,19 +1028,26 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
                     raise
     elif period in MIN_PERIODS:
         raw = None
-        try:
-            d0 = (await get_json(f"{BARE}/kline/mkline?param={symbol},{period},,{limit + MA_WARM}")).get("data")  # 分钟K同样多取预热
-            d = (d0.get(symbol) or {}) if isinstance(d0, dict) else {}
-            raw = d.get(period)
-        except HTTPException:
-            pass
-        if not raw:  # 腾讯分钟K拿不到（被 WAF 拦或该标的本就不支持）：逐级降级 东财(curl) → 新浪（A股）
+        if not symbol.startswith("hk"):  # 港股分钟K：腾讯 mkline 返回 param error、东财港股分钟K恒为空，直走新浪聚合，不白撞两轮
             try:
-                raw = await em_kline(symbol, period, limit + MA_WARM)
+                d0 = (await get_json(f"{BARE}/kline/mkline?param={symbol},{period},,{limit + MA_WARM}")).get("data")  # 分钟K同样多取预热
+                d = (d0.get(symbol) or {}) if isinstance(d0, dict) else {}
+                raw = d.get(period)
             except HTTPException:
-                raw = await sina_kline(symbol, period, limit + MA_WARM) if symbol[:2] in ("sh", "sz") else None
+                pass
+        if not raw:  # 腾讯分钟K拿不到（被 WAF 拦或该标的本就不支持）：逐级降级 东财(curl) → 新浪（A股）/ 新浪分时聚合（港股）
+            if symbol.startswith("hk"):
+                raw = await sina_hk_min_kline(symbol, period, limit + MA_WARM)  # 本地归档累积 + 聚合出 m5/m15/m30/m60
+                hk_days = len({r[0][:8] for r in raw})  # 实际覆盖交易日数，前端据此提示「根数为何比 A 股少」
+            else:
+                try:
+                    raw = await em_kline(symbol, period, limit + MA_WARM)
+                except HTTPException:
+                    raw = None
+                if not raw and symbol[:2] in ("sh", "sz"):
+                    raw = await sina_kline(symbol, period, limit + MA_WARM)
         if not raw:
-            return {"error": "该标的暂不支持分钟K（腾讯源分钟K仅A股/ETF可用）"}
+            return {"error": "该标的暂不支持分钟K（上游各源均无数据）"}
     else:
         return {"error": f"period 只支持: {sorted(DAY_PERIODS | MIN_PERIODS)}"}
     ind = indicators([float(r[2]) for r in raw])  # 指标在全量取数上算（含预热段），再切片对齐返回窗口
@@ -806,6 +1069,7 @@ async def kline(symbol: str = Query(...), period: str = "day", limit: int = 300,
         "klines": rows,
         "ind": ind,
         "tail": tail,
+        "hk_min_days": hk_days,  # 仅港股分钟K 有值：上游只给 5 个交易日，本地归档累积后会逐日变大
     }
 
 
@@ -827,7 +1091,47 @@ BT_UP = 0.005
 #   day=日k占Ma3（默认，每根=1 个交易日）  m60=1小时k占Ma3（每根=1 小时，A股每天 4 根）
 # m60 的根数上限：腾讯分钟K 单次最多约 800 根（超过 800 上游回落到 320 根），故 limit+MA_WARM 卡在 800
 BT_STRATS = {"day": {"period": "day", "label": "日k占Ma3", "limit": 800},
-             "m60": {"period": "m60", "label": "1小时k占Ma3", "limit": 800 - MA_WARM}}
+             "m60": {"period": "m60", "label": "1小时k占Ma3", "limit": 800 - MA_WARM},
+             # 止损反手（Stop-and-Reverse）：5 分钟 K 上按箱体破位反手。上游 m5 单次最多给 480 根，
+             # 过量请求会回落到 320 根，故 limit 卡在 660（+MA_WARM=784，实测可稳定返回 660 根 ≈ 14 个交易日）
+             "sr5": {"period": "m5", "label": "5分钟k止损反手", "limit": 660}}
+# 止损反手可选的 K 线周期 → 取数根数：m5 上游单次上限最低（超 480 会回落 320），故卡 660；其余周期沿用 676（+预热=800）
+# m1 同样卡 676（cnt=800 实测稳定返回 800 根）：搭配前端默认近 2 个交易日，A股约 480 根 / 美股约 782 根 / 港股约 664 根
+SR_LIMITS = {"m1": 676, "m5": 660, "m15": 676, "m30": 676, "m60": 676,
+             # 日K：单一标的日线历史足够长，400 根（+预热 124 = 524）足以盖住前端默认的 180 个交易日区间
+             "day": 400}
+# ---------- 止损反手 v7（2026-11-02：站上当根买、掉下当根卖，两边各看自己的 MA5/MA85）----------
+# 用户口径：快线（MA5）站上慢线（MA85）就买，掉下就卖——两条腿各自适用，不当根不延迟。
+# 实测旧 v3「前一根实体一破就反手」= 拿 1 根 K 的噪声当信号，10 个交易日换手 195 次、胜率 30.8%、-20.49%。
+# v4 箱体突破、v5 只看 A 的均线、v6 加 0.5% 缓冲 + 连续 2 根确认均已作废：用户要求规则能逐根对上图。
+# 买卖都是当根收盘价成交，不做缓冲/确认/冷却，也不加移动止损。
+# v10（2026-11-02）：卖点由「跌破 MA85」单线扩为「跌破 MA20 或 MA85」双线并存——收盘价先破哪条就当根全平；
+# v12 把辅线由 MA10 改为 MA20（用户：“10 日线不行，换成 20 日线”），MA20 按当前 K 线周期取 20 根。
+SR_MA_FAST = 5      # 快线（MA5）
+SR_MA_SLOW = 85     # 慢线（MA85）
+SR_MA_MID = 20      # 出场辅线（MA20）：与 MA85 并存，持仓侧收盘跌破任意一条即当根全平
+SR_MA_BUF = 0.0     # 乖离缓冲：0 = 只看 MA5 与 MA85 的真实相对位置
+# v11（2026-11-02 用户口径）：买点再加一道门槛——当根 K 柱「实体底」（开盘与收盘取低者，不含影线）
+# 必须严格高于 MA85，即实体要完全长在慢线上方；只靠均线交叉、K 柱还在慢线下方的当根不买。
+SR_REQ_BODY = True  # True = 买点要求实体底 > MA85；False = 回退成只看 MA5 > MA85
+# v12（2026-11-02 用户口径）：① 出场辅线 MA10 换成 MA20（跌到 MA20 之下就全卖）；
+# ② 买回/加仓要求价格「涨到 5 日线以上」——当根收盘价必须高于自己的 MA5。
+SR_BUY_ABOVE_FAST = True  # True = 买点/加仓要求当根收盘价 > MA5；False = 不看这一条
+# v13（2026-11-02 用户口径）：买点再补一条与卖点对称的门槛——当根收盘价必须在自己的 MA20 之上。
+# 用户原话「上升通道一直买，下降到达 20 日线就全卖，且后续一直是下降通道就不买」：
+# 原先卖点看 MA20（跌破全平）而买点完全不看 MA20，会出现「跌破 MA20 卖掉 → 下一根反弹站上 MA5、
+# 却仍在 MA20 下方又买回」的来回磨损。补上门槛后，收盘在 MA20 下方时一律不买/不加仓，
+# 必须等价格重新站回 MA20 之上（通道修复）才恢复逐根 1 万的加仓，卖/买对 MA20 互为镜像。
+SR_BUY_ABOVE_MID = True  # True = 买点/加仓要求当根收盘价 > MA20；False = 不看这一条
+SR_CONFIRM = 1      # 连续确认根数：1 = 当根就动手
+SR_CD = 0           # 两次动作之间的冷却根数：0 = 不冷却，破位当根即可反手
+SR_TRAIL = None     # 移动止损倍数：None = 不设止损（卖点只有掉下慢线）
+SR_EACH = 10000.0   # 每笔买入金额上限：趋势没坏就每根再加一笔，现金不够一笔就停手
+# v14（2026-11-02 用户口径）：页面新增「全额策略」按钮——判据不变，只换资金口径：
+# full=True 时买入一次把可用现金全额买入、卖出仍一次性全平，不逐根 1 万加仓（由 /api/backtest 的 full 参数传入）。
+SR_FULL = False     # 默认仍为每根 SR_EACH 加仓；页面点「全额策略」时以请求参数 full=true 覆盖
+SR_ATR_N = 14       # ATR 周期
+SR_COST = 0.0005    # 单边成本（价差+滑点），买卖各扣一次
 
 
 def bt_lab(v):
@@ -864,6 +1168,338 @@ def bt_dc(ma3, ma5, i):
     if None in (a, b, pa, pb):
         return False
     return a < b and pa >= pb
+
+
+def bt_run_sr(rows, capital):
+    # 止损反手（Stop-and-Reverse）逐根重演：本金拆两条腿各占一半，互不共享现金，任意时刻只持一边
+    #   多头腿：收盘价涨破前一根实体顶 → 用一半本金买入；收盘价跌破前一根实体底 → 卖出平掉
+    #   空头腿：收盘价跌破前一根实体底 → 用一半本金开空；收盘价涨破前一根实体顶 → 买入平掉
+    # 破位/突破一律以当根**收盘价**确认（盘中最高最低触及不算），按收盘价成交、不计手续费。
+    # 回测按「可做空」模拟，A 股实盘没有做空通道，这里的空头腿只用于验证规则本身。
+    half = float(capital) / 2
+    cash_l, qty_l, cost_l = half, 0.0, 0.0  # 多头腿：现金 / 持仓数量 / 开仓价
+    cash_s, qty_s, cost_s = half, 0.0, 0.0  # 空头腿：现金 / 空头数量 / 开空价
+    trades, nav = [], []
+    peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
+    n_long = n_short = 0
+    for i, r in enumerate(rows):
+        date = r[0][:16] if len(r[0]) > 10 else r[0][:10]  # 日K 到日，5 分钟K 到分钟
+        close = float(r[2])
+        if i > 0:  # 区间首根没有「前一根」，等第二根起才开始判定破位
+            ptop, pbot, _ph = bt_box(rows[i - 1])
+            if close > ptop:  # 涨破前一根实体顶：先平空，再开多
+                if qty_s > 0:
+                    gain = (cost_s - close) * qty_s
+                    trades.append({"date": date, "side": "buy", "leg": "short", "reason": "sc",
+                                   "price": round(close, 4), "qty": round(qty_s, 4),
+                                   "amount": round(close * qty_s, 2), "realized": round(gain, 2)})
+                    cash_s -= close * qty_s
+                    qty_s, cost_s = 0.0, 0.0
+                    closed += 1
+                    realized_all += gain
+                    if gain > 0:
+                        win += 1
+                if qty_l <= 0:
+                    q = half / close
+                    trades.append({"date": date, "side": "buy", "leg": "long", "reason": "lo",
+                                   "price": round(close, 4), "qty": round(q, 4),
+                                   "amount": round(half, 2), "realized": None})
+                    cash_l -= close * q
+                    qty_l, cost_l = q, close
+                    n_long += 1
+            elif close < pbot:  # 跌破前一根实体底：先平多，再开空
+                if qty_l > 0:
+                    gain = (close - cost_l) * qty_l
+                    trades.append({"date": date, "side": "sell", "leg": "long", "reason": "lc",
+                                   "price": round(close, 4), "qty": round(qty_l, 4),
+                                   "amount": round(close * qty_l, 2), "realized": round(gain, 2)})
+                    cash_l += close * qty_l
+                    qty_l, cost_l = 0.0, 0.0
+                    closed += 1
+                    realized_all += gain
+                    if gain > 0:
+                        win += 1
+                if qty_s <= 0:
+                    q = half / close
+                    trades.append({"date": date, "side": "sell", "leg": "short", "reason": "so",
+                                   "price": round(close, 4), "qty": round(q, 4),
+                                   "amount": round(half, 2), "realized": None})
+                    cash_s += close * q
+                    qty_s, cost_s = q, close
+                    n_short += 1
+        # 净值 = 多头腿（现金+市值）+ 空头腿（卖空所得现金 - 空头市值）
+        equity = cash_l + qty_l * close + cash_s - qty_s * close
+        if equity > peak:
+            peak = equity
+        dd = equity / peak - 1
+        if dd < mdd:
+            mdd = dd
+        nav.append({"date": date, "equity": round(equity, 2), "pct": round((equity / capital - 1) * 100, 4)})
+    end_eq = nav[-1]["equity"] if nav else float(capital)
+    total = (end_eq / capital - 1) * 100
+    days = 0
+    if len(rows) >= 2:
+        days = (datetime.date.fromisoformat(rows[-1][0][:10]) - datetime.date.fromisoformat(rows[0][0][:10])).days
+    years = days / 365
+    px = [float(r[2]) for r in rows]
+    float_pnl = (px[-1] - cost_l) * qty_l + (cost_s - px[-1]) * qty_s
+    return {
+        "trades": trades, "nav": nav,
+        "stats": {
+            "capital": round(float(capital), 2), "end": round(end_eq, 2),
+            "total": round(total, 2), "mdd": round(mdd * 100, 2),
+            "ann": round((pow(1 + total / 100, 1 / years) - 1) * 100, 2) if years >= 0.25 else None,
+            "buys": sum(1 for t in trades if t["side"] == "buy"),
+            "sells": sum(1 for t in trades if t["side"] == "sell"),
+            "longs": n_long, "shorts": n_short,  # 开多/开空次数（次数口径与 buys/sells 不同）
+            "closes": closed,  # 平仓次数（lc + sc，即胜率的分母）
+            "win": win, "winrate": round(win / closed * 100, 1) if closed else None,
+            "realized": round(realized_all, 2),
+            "pnl": round(end_eq - float(capital), 2),   # 本策略盈利金额（期末资金 - 本金）
+            "open_qty": round(qty_l, 4), "open_cost": round(cost_l, 4),
+            "short_qty": round(qty_s, 4), "short_cost": round(cost_s, 4),
+            "float_pnl": round(float_pnl, 2),
+            "first": rows[0][0][:10] if rows else "", "last": rows[-1][0][:10] if rows else "",
+            "n": len(rows), "days": days,
+        },
+    }
+
+
+def sr_atr(rows, n=SR_ATR_N):
+    # ATR 与 K 线等长：首 n-1 根用已有根数算（不返回 None，避免开头几十根全被跳过）
+    out, trs, pc = [], [], None
+    for r in rows:
+        hi, lo, c = float(r[3]), float(r[4]), float(r[2])
+        tr = hi - lo if pc is None else max(hi - lo, abs(hi - pc), abs(lo - pc))
+        trs.append(tr)
+        win = trs[-n:]
+        out.append(sum(win) / len(win))
+        pc = c
+    return out
+
+
+def sr_ma(rows, n):
+    # 简单均值；不够 n 根时返回 None（由调用方决定不交易）
+    out, s = [], 0.0
+    for i, r in enumerate(rows):
+        s += float(r[2])
+        if i >= n:
+            s -= float(rows[i - n][2])
+        out.append(s / n if i >= n - 1 else None)
+    return out
+
+
+def bt_run_pair(rows_a, rows_b, sym_a, sym_b, capital,
+                ma5_a=None, ma85_a=None, ma5_b=None, ma85_b=None,
+                ma20_a=None, ma20_b=None, full=False):
+    # 跨标的止损反手（规则见文件头 SR_* 常量）：两条腿各看自己的均线，当根站上就买、跌破就卖。
+    #   入场（v11+v12+v13）：A 的 MA5 > MA85、当根实体底 > MA85、收盘价 > MA5、且收盘价 > MA20 → target=A；B 同判；
+    #     两边都成立取 MA5/MA85 更大的那边，都不成立空仓。v13 的「收盘 > MA20」与卖点的「收盘 < MA20」互为镜像：
+    #     跌破 MA20 卖掉后，价格没重新站回 MA20 上方就一直不买回（下降通道不接），站回去才恢复逐根加仓。
+    #     实体底 = min(开盘, 收盘)，不含影线；SR_REQ_BODY/SR_BUY_ABOVE_FAST/SR_BUY_ABOVE_MID 分别可关上述三条门槛。
+    #   离场：持仓侧自己的均线失守——收盘价跌破 MA20 或 MA85 任意一条（v12 两条并存，先破哪条算哪条）就当根全平。
+    # 买卖各扣 SR_COST 成本；SR_TRAIL 默认 None（不额外设止损）。
+    # B 的时间轴与 A 不一定逐根对齐（停牌/上市日不同）：按时间取 B 收盘/ATR/均线，缺根沿用上一根。
+    # 资金：两条腿共用一份本金（v8），每笔最多 SR_EACH，趋势没坏就每根再加一笔，卖出一次性全平。
+    # full=True（v14，页面「全额策略」按钮）：一次把可用现金全额买入、卖出仍一次性全平，不做每根 1 万的逐根加仓。
+    #   全额买满后 cash=0，下一根的入场门禁 cash<=0 自然停手，故不需要额外的“已持仓不加仓”分支。
+    cash = float(capital)
+    qty_a, cost_a = 0.0, 0.0    # A 腿：持仓数量 / 当前这一轮累计买入本钱（含成本）
+    qty_b, cost_b = 0.0, 0.0    # B 腿：同上
+    bmap, batr, bma, bbody = {}, {}, {}, {}
+    atr_b = sr_atr(rows_b)
+    ma5b = ma5_b if (ma5_b and len(ma5_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_FAST)
+    ma85b = ma85_b if (ma85_b and len(ma85_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_SLOW)
+    ma20b = ma20_b if (ma20_b and len(ma20_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_MID)
+    for r, a, f, s, t in zip(rows_b, atr_b, ma5b, ma85b, ma20b):
+        k = r[0][:16] if len(r[0]) > 10 else r[0][:10]
+        bmap[k] = float(r[2])
+        batr[k] = a
+        bma[k] = (f, s, t)
+        bbody[k] = min(float(r[1]), float(r[2]))   # 实体底：买点要求它高于 B 自己的 MA85
+    atr_a = sr_atr(rows_a)
+    ma5 = ma5_a if (ma5_a and len(ma5_a) == len(rows_a)) else sr_ma(rows_a, SR_MA_FAST)
+    ma85 = ma85_a if (ma85_a and len(ma85_a) == len(rows_a)) else sr_ma(rows_a, SR_MA_SLOW)
+    ma20 = ma20_a if (ma20_a and len(ma20_a) == len(rows_a)) else sr_ma(rows_a, SR_MA_MID)
+    trades, nav = [], []
+    peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
+    n_a = n_b = 0
+    realized_a = realized_b = 0.0
+    pos, last_act, ext = None, -10 ** 9, None   # pos=A/B/None；last_act=上一次买或卖的序号；ext=持仓期最有利收盘
+    su = fu = 0                            # A / B 各自站在快慢线上方的连续根数
+    sold_bar = -1                          # 卖出当根不再买回（下一根再说过）
+    last_b = float(rows_b[0][2]) if rows_b else None
+
+    def _mark_after_trade():
+        # 净值一律按「本根成交全部落账后」记：原先是先按成交前记一次，卖出当根会漏掉那笔单边成本，
+        # 使 pnl_a+pnl_b 与 pnl=end-capital 出现 0.05%×卖出市值的缺口（m5 实测差 4.99 元）。
+        e = cash + qty_a * close + qty_b * last_b
+        nav[-1]["equity"] = round(e, 2)
+        nav[-1]["pct"] = round((e / float(capital) - 1) * 100, 4)
+
+    for i, r in enumerate(rows_a):
+        date = r[0][:16] if len(r[0]) > 10 else r[0][:10]
+        close = float(r[2])
+        if date in bmap:
+            last_b = bmap[date]
+        if last_b is None:
+            continue
+        px = close if pos != "B" else last_b
+        if pos == "A":
+            ext = max(ext, close)
+        elif pos == "B":
+            ext = min(ext, last_b)
+        # 净值 = 现金 + A 腿市值 + B 腿市值（两条腿共用一份现金）
+        equity = cash + qty_a * close + qty_b * last_b
+        if equity > peak:
+            peak = equity
+        mdd = min(mdd, equity / peak - 1)
+        nav.append({"date": date, "equity": round(equity, 2),
+                    "pct": round((equity / float(capital) - 1) * 100, 4)})
+        if i >= len(ma5) or ma5[i] is None or i >= len(ma85) or ma85[i] is None:
+            continue
+        fast, slow = ma5[i], ma85[i]
+        mid = ma20[i] if i < len(ma20) else None
+        fast_b, slow_b, mid_b = bma.get(date, (None, None, None))
+        body_a = min(float(r[1]), close)   # 当根实体底（开、收取低者），影线不计
+        su = su + 1 if fast > slow * (1 + SR_MA_BUF) else 0
+        # 买点（v11 实体底门槛 + v12 站上 MA5）：均线交叉、实体长在 MA85 上方，且收盘价还要站回 MA5 之上
+        up_a = (su >= SR_CONFIRM and (not SR_REQ_BODY or body_a > slow)
+                and (not SR_BUY_ABOVE_FAST or close > fast)
+                and (not SR_BUY_ABOVE_MID or mid is None or close > mid))
+        # v13：收盘在 MA20 下方视为「下降通道未修复」，一律不买——与下方 dn 的 MA20 卖点互为镜像
+        # 卖点（用户口径）：K 柱收盘跌破 MA20 或 MA85 任意一条就全卖，不等 MA5 下穿（两条并存、先破哪条算哪条）
+        dn_a = close < slow or (mid is not None and close < mid)
+        up_b = dn_b = False
+        if fast_b and slow_b:
+            fu = fu + 1 if fast_b > slow_b * (1 + SR_MA_BUF) else 0
+            body_b = bbody.get(date)
+            up_b = (fu >= SR_CONFIRM and (not SR_REQ_BODY or (body_b is not None and body_b > slow_b))
+                    and (not SR_BUY_ABOVE_FAST or last_b > fast_b)
+                    and (not SR_BUY_ABOVE_MID or mid_b is None or last_b > mid_b))
+            dn_b = last_b < slow_b or (mid_b is not None and last_b < mid_b)
+        # 哪边趋势好买哪边：两边都满足时比快慢线乖离，都不满足时空仓
+        target = None
+        if up_a and up_b:
+            target = "A" if fast / slow >= fast_b / slow_b else "B"
+        elif up_a:
+            target = "A"
+        elif up_b:
+            target = "B"
+        # ---- 离场：持仓标的自己掉下慢线，或移动止损 ----
+        if pos == "A":
+            why = ("止损" if SR_TRAIL and close < ext - SR_TRAIL * atr_a[i] else
+                   "反手" if dn_a else None)
+            if why:
+                amt = qty_a * close * (1 - SR_COST)
+                cash += amt
+                gain = amt - cost_a
+                trades.append({"date": date, "sym": sym_a, "side": "sell", "leg": "A", "reason": "lc",
+                               "note": why, "price": round(close, 4), "qty": round(qty_a, 4),
+                               "amount": round(amt, 2), "realized": round(gain, 2)})
+                qty_a, cost_a = 0.0, 0.0
+                closed += 1
+                realized_all += gain
+                realized_a += gain
+                win += 1 if gain > 0 else 0
+                pos, last_act, ext = None, i, None
+                sold_bar = i
+        elif pos == "B":
+            mtb = batr.get(date) or atr_a[i]
+            if SR_TRAIL and last_b > ext + SR_TRAIL * mtb:
+                why = "止损"
+            elif dn_b:
+                why = "反手"
+            else:
+                why = None
+            if why:
+                amt = qty_b * last_b * (1 - SR_COST)
+                cash += amt
+                gain = amt - cost_b
+                trades.append({"date": date, "sym": sym_b, "side": "sell", "leg": "B", "reason": "bc",
+                               "note": why, "price": round(last_b, 4), "qty": round(qty_b, 4),
+                               "amount": round(amt, 2), "realized": round(gain, 2)})
+                qty_b, cost_b = 0.0, 0.0
+                closed += 1
+                realized_all += gain
+                realized_b += gain
+                win += 1 if gain > 0 else 0
+                pos, last_act, ext = None, i, None
+                sold_bar = i
+        # ---- 入场/加仓（共用现金池：每笔最多 SR_EACH；趋势没坏就下一根再加一笔，换向只在旧仓位已平掉时发生）----
+        # full=True 时门槛换成「现金已用完就停」、每笔金额换成全额，其余判据一字不改
+        if target is None or (cash <= 0 if full else cash < SR_EACH) or i - last_act < SR_CD or i == sold_bar:
+            _mark_after_trade()
+            continue
+        if pos is not None and pos != target:
+            _mark_after_trade()
+            continue
+        first = pos is None          # 本轮开仓的第一笔（之后同向的都是加仓）
+        note = ("全额买入" if full else "站上MA5买入") if first else "仍在MA5上方加仓"
+        amt = cash if full else min(SR_EACH, cash)
+        cash -= amt
+        if target == "A":
+            buy_qty = amt * (1 - SR_COST) / close
+            qty_a += buy_qty
+            cost_a += amt
+            trades.append({"date": date, "sym": sym_a, "side": "buy", "leg": "A", "reason": "lo",
+                           "note": note, "price": round(close, 4), "qty": round(buy_qty, 4),
+                           "amount": round(amt, 2), "realized": None})
+            if first:
+                pos, last_act, ext = "A", i, close
+            n_a += 1
+        else:
+            buy_qty = amt * (1 - SR_COST) / last_b
+            qty_b += buy_qty
+            cost_b += amt
+            trades.append({"date": date, "sym": sym_b, "side": "buy", "leg": "B", "reason": "bo",
+                           "note": note, "price": round(last_b, 4), "qty": round(buy_qty, 4),
+                           "amount": round(amt, 2), "realized": None})
+            if first:
+                pos, last_act, ext = "B", i, last_b
+            n_b += 1
+        _mark_after_trade()
+    end_eq = nav[-1]["equity"] if nav else float(capital)
+    total = (end_eq / float(capital) - 1) * 100
+    days = 0
+    if len(rows_a) >= 2:
+        days = (datetime.date.fromisoformat(rows_a[-1][0][:10]) - datetime.date.fromisoformat(rows_a[0][0][:10])).days
+    years = days / 365
+    px = float(rows_a[-1][2]) if rows_a else float(capital)
+    px_b = last_b if last_b is not None else px
+    # 每腿盈利 = 该腿已实现盈亏 + 当前持仓浮动（市值 − 本钱）；两腿之和恒等于策略总盈利
+    # （v8 两条腿共用一份现金，不再有各腿独立现金，故不能再用“该腿现金+市值−半仓本金”算）
+    pnl_a = realized_a + (qty_a * px - cost_a)
+    pnl_b = realized_b + (qty_b * px_b - cost_b)
+    float_pnl = (qty_a * px - cost_a) + (qty_b * px_b - cost_b)
+    return {
+        "trades": trades, "nav": nav,
+        "stats": {
+            "capital": round(float(capital), 2), "end": round(end_eq, 2),
+            "total": round(total, 2), "mdd": round(mdd * 100, 2),
+            "ann": round((pow(1 + total / 100, 1 / years) - 1) * 100, 2) if years >= 0.25 else None,
+            "buys": sum(1 for t in trades if t["side"] == "buy"),
+            "sells": closed,
+            "longs": n_a, "shorts": n_b,  # 跨标的模式下：A 腿买入次数 / B 腿买入次数
+            "flips": n_b,  # 换手次数 = 反手买反向标的的次数（新版是空仓后再进，不会同日互换）
+            "closes": closed, "win": win,
+            "winrate": round(win / closed * 100, 1) if closed else None,
+            "realized": round(realized_all, 2),
+            "realized_a": round(realized_a, 2), "realized_b": round(realized_b, 2),
+            "pnl": round(end_eq - float(capital), 2),   # 整个策略的盈利金额
+            "pnl_a": round(pnl_a, 2), "pnl_b": round(pnl_b, 2),
+            "ret_a": round(pnl_a / float(capital) * 100, 2) if capital else None,   # 该腿盈亏占本金的比例
+            "ret_b": round(pnl_b / float(capital) * 100, 2) if capital else None,
+            "float_a": round(pnl_a - realized_a, 2), "float_b": round(pnl_b - realized_b, 2),
+            "open_qty": round(qty_a, 4), "open_cost": round(px if qty_a else 0.0, 4),
+            "short_qty": round(qty_b, 4), "short_cost": round(px_b if qty_b else 0.0, 4),
+            "float_pnl": round(float_pnl, 2),
+            "pair": True, "sym_a": sym_a, "sym_b": sym_b,
+            "full": 1 if full else 0,   # 资金口径标识：1=一次全额买入/全额卖出，0=每根 SR_EACH 逐根加仓
+            "first": rows_a[0][0][:10] if rows_a else "", "last": rows_a[-1][0][:10] if rows_a else "",
+            "n": len(rows_a), "days": days,
+        },
+    }
 
 
 def bt_run(rows, ma3, ma5, capital, each, stop_drop=False):
@@ -1015,12 +1651,17 @@ def bt_run(rows, ma3, ma5, capital, each, stop_drop=False):
 @app.get("/api/backtest")
 async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
                    capital: float = 100000.0, each: float = 10000.0,
-                   name: str = "", save: bool = True, tf: str = "day"):
+                   name: str = "", save: bool = True, tf: str = "day", p: str = "", pair: str = "",
+                   full: bool = False):
     if capital <= 0 or each <= 0:
         return {"error": "本金与单次买入金额需大于 0"}
     st_tf = BT_STRATS.get(tf)
     if not st_tf:
-        return {"error": "策略类型只支持 day（日k占Ma3）/ m60（1小时k占Ma3）"}
+        return {"error": "策略类型只支持 day（日k占Ma3）/ m60（1小时k占Ma3）/ sr5（5分钟k止损反手）"}
+    if tf == "sr5" and p:  # 策略页可在 1/5/15/30/60 分钟间切换，这里按传入周期覆盖默认 m5
+        if p not in SR_LIMITS:
+            return {"error": "止损反手的 K 线周期只支持 m1 / m5 / m15 / m30 / m60 / day"}
+        st_tf = {"period": p, "label": f"止损反手（{p}）", "limit": SR_LIMITS[p]}
     d = await kline(symbol, st_tf["period"], st_tf["limit"], start, end)  # 复用 kline 取数口径（含均线预热与区间切片）
     if d.get("error"):
         return d
@@ -1030,12 +1671,29 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
     if len(rows) < 3:
         return {"error": "区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
     ind = d.get("ind") or {}
-    res = bt_run(rows, ind.get("ma3") or [], ind.get("ma5") or [], capital, each, _mkt_of(symbol) == "a")
-    # 回测用 MA3/MA5 判信号（MA3 金叉 MA5 + 实体占上 MA3），图面另叠 MA3/MA5/MA85/MA125 四条均线供对照
+    if tf == "sr5" and pair:  # 跨标的反手：symbol=上方标的（信号源），pair=下方反向标的
+        db = await kline(pair, st_tf["period"], st_tf["limit"], start, end)
+        rows_b = db.get("klines") or []
+        if st_tf["period"] != "day":
+            rows_b = [[bt_lab(r[0])] + list(r[1:]) for r in rows_b]
+        if len(rows_b) < 3:
+            return {"error": f"反向标的 {pair} 在该区间取不到分钟K，请检查代码或换个周期"}
+        ind_b = db.get("ind") or {}
+        res = bt_run_pair(rows, rows_b, symbol, pair, capital,
+                          ind.get("ma5") or [], ind.get("ma85") or [],
+                          ind_b.get("ma5") or [], ind_b.get("ma85") or [],
+                          ind.get("ma20") or [], ind_b.get("ma20") or [],
+                          full=full)   # full=True：页面「全额策略」——一次买满、卖出全平，不逐根加仓
+    elif tf == "sr5":  # 单标的旧路径（只能持多/空一边，不买反向标的）；页面跨标的走的是 bt_run_pair
+        res = bt_run_sr(rows, capital)
+    else:
+        res = bt_run(rows, ind.get("ma3") or [], ind.get("ma5") or [], capital, each, _mkt_of(symbol) == "a")
+    # 回测用 MA3/MA5 判信号（MA3 金叉 MA5 + 实体占上 MA3），图面另叠 MA3/MA5/MA20/MA85 四条均线供对照
     res.update({"symbol": symbol, "period": st_tf["period"], "tf": tf, "strat": st_tf["label"],
+                "pair": pair,
                 "klines": rows,
                 "ma3": ind.get("ma3") or [],
-                "ind": {k: ind.get(k) or [] for k in ("ma3", "ma5", "ma85", "ma125")}})
+                "ind": {k: ind.get(k) or [] for k in ("ma3", "ma5", "ma20", "ma85")}})
     if save:  # 每次回测自动落一条记录（供「回测记录」翻阅），落库失败不影响本次结果
         st0 = res.get("stats") or {}
         snap = {"symbol": symbol, "name": name or symbol, "tf": tf, "strat": st_tf["label"],
@@ -1117,6 +1775,11 @@ async def bt_record(rid: int):
         data = json.loads(r["payload"])
     except Exception:
         return {"error": "记录内容已损坏，删掉重新回测即可"}
+    ind = data.get("ind") or {}
+    if "ma20" not in ind:  # 旧快照只存了 ma125，图面已改画 MA20：用快照收盘价补算（区间内无预热，前 19 根无值）
+        cs = [float(x[2]) for x in (data.get("klines") or [])]
+        ind["ma20"] = [round(sum(cs[i - 19:i + 1]) / 20, 4) if i >= 19 else None for i in range(len(cs))]
+        data["ind"] = ind
     tf = r["tf"] or "day"
     return {"id": r["id"], "symbol": r["symbol"], "name": r["name"], "start": r["start"],
             "end": r["end"], "capital": r["capital"], "each": r["each"],
@@ -1178,7 +1841,7 @@ async def search(q: str = Query(...)):
 async def cards_get(scope: str = "hist", as_of: str = ""):
     con = _conn()
     _promote_bought_cards(con, scope, _norm_asof(as_of))  # hist 视点驱动/live 每日游标，函数注释有口径分叉
-    rows = con.execute(f"SELECT symbol, name, period FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()
+    rows = con.execute(f"SELECT symbol, name, period, pair FROM {_tbl(scope, 'cards')} ORDER BY pos").fetchall()
     con.close()
     return {"cards": [dict(r) for r in rows]}
 
@@ -1369,12 +2032,14 @@ async def cards_put(payload: dict, scope: str = "hist"):
     rows = []
     for c in payload.get("cards") or []:
         if isinstance(c, dict) and c.get("symbol"):
-            rows.append((str(c["symbol"]), str(c.get("name") or ""), str(c.get("period") or "day")))
+            rows.append((str(c["symbol"]), str(c.get("name") or ""), str(c.get("period") or "day"),
+                         str(c.get("pair") or "")))
     con = _conn()
     with con:  # 一个事务内先清后插：数组顺序即 pos
         con.execute(f"DELETE FROM {_tbl(scope, 'cards')}")
-        con.executemany(f"INSERT INTO {_tbl(scope, 'cards')} (pos, symbol, name, period) VALUES (?, ?, ?, ?)",
-                        [(i, s, n, p) for i, (s, n, p) in enumerate(rows)])
+        con.executemany(f"INSERT INTO {_tbl(scope, 'cards')} (pos, symbol, name, period, pair) "
+                        f"VALUES (?, ?, ?, ?, ?)",
+                        [(i, s, n, p, pr) for i, (s, n, p, pr) in enumerate(rows)])
     con.close()
     return {"ok": True, "count": len(rows)}
 
@@ -1503,6 +2168,33 @@ async def prefs_put(payload: dict):
         con.executemany("INSERT OR REPLACE INTO prefs (key, value) VALUES (?, ?)", items)
     con.close()
     return {"ok": True, "count": len(items)}
+
+
+@app.get("/api/recent")
+async def recent_get(limit: int = 8):
+    # 最近搜过的标的（跨浏览器共享，跟库走）：按最近一次选中时间倒序，默认给 8 条
+    n = max(1, min(limit, 20))
+    con = _conn()
+    rows = con.execute("SELECT symbol, name FROM recent_sym ORDER BY ts DESC LIMIT ?", (n,)).fetchall()
+    con.close()
+    return {"items": [{"symbol": r["symbol"], "name": r["name"]} for r in rows]}
+
+
+@app.post("/api/recent")
+async def recent_post(payload: dict):
+    # 选中一只标的就记一条（同代码覆盖时间戳置顶，不产生重复）；只留最近 40 条，防表无限增长
+    sym = str(payload.get("symbol") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not sym or len(sym) > 24:
+        return {"ok": False}
+    con = _conn()
+    with con:
+        con.execute("INSERT OR REPLACE INTO recent_sym (symbol, name, ts) VALUES (?, ?, ?)",
+                    (sym, name[:32], datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        con.execute("DELETE FROM recent_sym WHERE symbol NOT IN "
+                    "(SELECT symbol FROM recent_sym ORDER BY ts DESC LIMIT 40)")
+    con.close()
+    return {"ok": True}
 
 
 @app.get("/api/account")
@@ -1665,26 +2357,43 @@ async def _heat_of(sym, mkt, q, sem):
 
 
 @app.get("/api/heat")
-async def heat():
+async def heat(force: bool = False):
     # 顶部固定条专用：一次扫完两个仓的全部标的，只返回数据、不弹通知（通知通道见 /api/notify/scan）
-    con = _conn()
-    rows = con.execute("SELECT symbol, name FROM cards UNION SELECT symbol, name FROM cards_live").fetchall()
-    con.close()
-    names = {r["symbol"]: r["name"] for r in rows}
-    syms = list(names)
-    at = _beijing_now().strftime("%H:%M:%S")
-    if not syms:
-        return {"items": [], "at": at}
-    qs = await _qt_bulk(syms)
-    sem = asyncio.Semaphore(3)
-    res = await asyncio.gather(*(_heat_of(s, _mkt_of(s), qs.get(s), sem) for s in syms), return_exceptions=True)
-    items = []
-    for s, r in zip(syms, res):
-        if isinstance(r, dict):
-            r["name"] = names.get(s, "")
-            r["market"] = _mkt_of(s)
-            items.append(r)
-    return {"items": items, "at": at}
+    # 结果缓存 3 分钟：全量扫描要拉几十次日K（并发卡在 3），上游被 WAF 拦住走降级链时能扫好几分钟；
+    # 不缓存时页面每分钟重扫一次，扫描会一层层叠着跑，把浏览器同域名 6 个连接和后端连接池全占满，
+    # 卡片取数排到后面，看上去就像整页反复重载
+    now = time.time()
+    if not force and _HEAT["d"] and now - _HEAT["t"] < HEAT_TTL:
+        return _HEAT["d"]
+    async with _HEAT_LOCK:  # 并发的重扫合并：后到的等前一次扫完直接拿结果，不叠加第二次全量扫
+        if not force and _HEAT["d"] and time.time() - _HEAT["t"] < HEAT_TTL:
+            return _HEAT["d"]
+        con = _conn()
+        rows = con.execute("SELECT symbol, name FROM cards UNION SELECT symbol, name FROM cards_live").fetchall()
+        con.close()
+        names = {r["symbol"]: r["name"] for r in rows}
+        syms = list(names)
+        at = _beijing_now().strftime("%H:%M:%S")
+        if not syms:
+            return {"items": [], "at": at}
+        qs = await _qt_bulk(syms)
+        sem = asyncio.Semaphore(3)
+        # 卡 45 秒：上游被 WAF 拦住时每只票都要走完降级链（东财 curl 单次就到 10 秒），40 只叠起来能拖两分钟，
+        # 超时就把已扫完的先上屏（信号条是展示层，缺几只无所谓，下一轮再补齐），不把整个页面拖死
+        tasks = [asyncio.create_task(_heat_of(s, _mkt_of(s), qs.get(s), sem)) for s in syms]
+        done, pending = await asyncio.wait(tasks, timeout=45)
+        for t in pending:
+            t.cancel()
+        items = []
+        for s, t in zip(syms, tasks):
+            r = t.result() if t in done and not t.cancelled() and t.exception() is None else None
+            if isinstance(r, dict):
+                r["name"] = names.get(s, "")
+                r["market"] = _mkt_of(s)
+                items.append(r)
+        out = {"items": items, "at": at}
+        _HEAT.update(t=time.time(), d=out)
+        return out
 
 
 async def scan_signals(mkts=None):
