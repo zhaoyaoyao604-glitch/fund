@@ -8,11 +8,13 @@
      标的由顶部两个代码输入框决定；数据来自后端 /api/kline?symbol=...&period=m1|m5|m15|m30|m60[&start/end]，
      美股分钟K由后端新浪 getMinK 转发，一次约 1023 根（故"时间范围"只能在最近几个交易日内生效）。
      止损反手回测是跨标的换手（/api/backtest?tf=sr5&pair=下方标的）：两条腿各看自己的均线，共用这 10 万。
-     买入：该标的当根 MA5 站在 MA85 上方、K 柱实体底（开收较低者，不含影线）也在 MA85 上方、收盘价站回 MA5 之上、且收盘价在 MA20 上方 → 当根收盘价买 1 万；没掉下去就下一根再加 1 万，现金不够一笔就停手。
-     卖出：持仓标的当天收盘价跌破它自己的 MA20 或 MA85 任意一条（两条线并存，先破哪条算哪条）→ 当根收盘一次全平，当根不再买回。
+     买入：该标的当根 MA5 站在 MA85 上方、K 柱实体底（开收较低者，不含影线）也在 MA85 上方、收盘价站回 MA5 之上、收盘价在 MA20 上方、且当根箱体（实体开→收）的顶和底都比前一根高 → 当根收盘价买 1 万；没掉下去就下一根再加 1 万，现金不够一笔就停手。
+     卖出：持仓标的当天收盘价跌破它自己的 MA20 或 MA85 任意一条（两条线并存，先破哪条算哪条），或当根箱体顶和底同时低于前一根（渠道下移）→ 当根收盘一次全平，当根不再买回。
      卖出后价格没重新站回 MA20 上方（下降通道未修复）就一直不买回，站回去才恢复逐根加仓。
-     资金口径两档（两个按钮，判据完全相同）：①「止损反手」= 每根最多买 1 万、趋势没坏就逐根加仓（full=false）；
-     ②「全额策略」= 一次把可用资金全额买入、卖出一次性全额卖出，不逐根加仓（full=true，后端 bt_run_pair 的 full 参数）。
+     资金/判据三档（三个按钮）：①「分批&止损反手&安全」= 上文这套 MA 判据，每根最多买 1 万、趋势没坏就逐根加仓（full=false）；
+     ②「全额&amp;趋势安全」= 同一套判据，一次把可用资金全额买入、卖出一次性全额卖出，不逐根加仓（full=true）；
+     ③「半额&止损反手&风险」= 另一套判据且双账户：本金对半拆给上下两条腿各自独立，每笔买用该腿手上全额（half=true）；
+        不看 MA5/MA20/MA85，只要当根 MA3 高于前一根（趋势向上）且当根实体顶比前一根高就买入，实体顶没再抬高就当根全平。
      A 腿（上方标的）的 B/S 画上图，B 腿（下方标的）的 B/S 画下图且统一蓝色。 -->
 <style>
   :root {
@@ -116,6 +118,10 @@
   }
   .kc-tab:hover { border-color: var(--tx-6); }
   .kc-tab.on { background: var(--bg-accent-weak); border-color: var(--amber); color: var(--amber); }
+  /* 「5分」档后面的黄色星标：只是视觉标记，不参与切档逻辑 */
+  .kc-star { color: #ffd166; margin-left: 3px; font-size: 11px; line-height: 1; }
+  /* 带星标的那一档右边距收窄 2px，抵消星标带来的视觉加宽（星标档位随当前策略按钮变：分批/全额看 5 分，半额风险看 60 分） */
+  .kc-tab.starred { padding-right: 9px; }
   /* 第二行：左边图例（MA3/MA20/MA85 + 买卖点，点击可隐藏），右边周期按钮 */
   .kc-row2 { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
   .kc-row2 .kc-tabs { margin-left: auto; }
@@ -150,12 +156,13 @@
   .kc-srbtn {
     background: var(--bg-soft); color: var(--tx-2);
     border: var(--bd-1); border-radius: 4px;
-    padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap;
-    margin-left: auto;
+    /* 文字严格上下居中：中文字形不能用 line-height:1（会视觉偏上），锁 18px 行高再由 flex 居中 */
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 26px; padding: 0 9px; font-size: 12px; line-height: 18px; cursor: pointer; white-space: nowrap;
   }
   .kc-srbtn:hover { border-color: var(--tx-6); }
-  /* 两个模式按钮并排靠右：靠左的吃掉 auto 外边距，靠右的只留 8px 间隔 */
-  .kc-srbtn + .kc-srbtn { margin-left: 8px; }
+  /* 两个模式按钮并排靠右：间距只由整组 flex gap 控制 8px，按钮自身不再带外边距（否则会与 .kc-head 的 column-gap 叠加） */
+  .kc-btns { display: flex; gap: 8px; margin-left: auto; }
   .kc-srbtn.on { background: var(--bg-accent-weak); border-color: var(--amber); color: var(--amber); }
   .kc-stat {
     display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 26px;
@@ -209,8 +216,11 @@
           <input type="date" id="dend" title="结束日期" />
           <button class="kc-clr" id="dclr" title="清除时间范围">清除</button>
         </span>
-        <button class="kc-srbtn" id="kc-full" title="全额策略：判据与「止损反手」完全一致，只换资金口径——买入时一次把可用资金全额买入（不再每根买 1 万），卖出时仍一次性全额卖出；换向时全部转仓。成本按单边 0.05% 扣。">全额策略</button>
-        <button class="kc-srbtn" id="kc-sr" title="止损反手回测（跨标的）：先确定上下标的与时间范围，点此才加载下方图表；两条腿各看自己的 MA5/MA20/MA85，共用 10 万本金。买入：该标的当根 MA5 站上 MA85、K 柱实体底也在 MA85 上方、收盘价站回 MA5 之上、且收盘价在 MA20 上方才买 1 万，没掉下去就每根再加 1 万，最多加到 10 万；两边都满足时比乖离取强的。卖出：持仓标的收盘价跌破它自己的 MA20 或 MA85（两条线并存，先破哪条算哪条）就当根全部卖出，当根不再买回；卖掉后价格没重新站回 MA20 上方就一直不买回（下降通道不接）。成本按单边 0.05% 扣。">止损反手</button>
+        <span class="kc-btns">
+        <button class="kc-srbtn" id="kc-full" title="全额&amp;趋势安全：判据与「分批&amp;止损反手&amp;安全」完全一致，只换资金口径——买入时一次把可用资金全额买入（不再每根买 1 万），卖出时仍一次性全额卖出；换向时全部转仓。成本按单边 0.05% 扣。">全额&amp;趋势安全</button>
+        <button class="kc-srbtn" id="kc-sr" title="止损反手回测（跨标的）：先确定上下标的与时间范围，点此才加载下方图表；两条腿各看自己的 MA5/MA20/MA85，共用 10 万本金。买入：该标的当根 MA5 站上 MA85、K 柱实体底也在 MA85 上方、收盘价站回 MA5 之上、收盘价在 MA20 上方、且当根箱体顶和底都比前一根高才买 1 万，没掉下去就每根再加 1 万，最多加到 10 万；两边都满足时比乖离取强的。卖出：持仓标的收盘价跌破它自己的 MA20 或 MA85（两条线并存，先破哪条算哪条），或当根箱体顶和底同时低于前一根（渠道下移）就当根全部卖出，当根不再买回；卖掉后价格没重新站回 MA20 上方就一直不买回（下降通道不接）。成本按单边 0.05% 扣。">分批&amp;止损反手&amp;安全</button>
+<button class="kc-srbtn" id="kc-half" title="半额&amp;止损反手&amp;风险：本金对半拆给上下两条腿各自独立（各 5 万），每笔买入花掉该腿手上的全部现金一次打满（做多与做空平分全额）。判据不看 MA5/MA20/MA85：只要当根 MA3 高于前一根（3 根均线趋势向上）且当根 K 线实体顶（开收较高者，不含影线）高于前一根实体顶就满仓买入；当根实体顶小于等于前一根实体顶（第二根没再抬高）就当根全部卖出，不等破均线。成本按单边 0.05% 扣。">半额&amp;止损反手&amp;风险</button>
+</span>
       </div>
       <div class="kc-stat" id="kc-stat"></div>
       <div class="kc-row2">
@@ -224,7 +234,7 @@
           <div class="kc-title" id="ttlB"></div>
         </div>
       </div>
-      <div class="kc-tip" id="kc-tip">请先确定上/下标的与时间范围，再点「止损反手」（每根 1 万）或「全额策略」（一次满仓）加载图表</div>
+      <div class="kc-tip" id="kc-tip">请先确定上/下标的与时间范围，再点「分批&amp;止损反手&amp;安全」（每根 1 万）、「全额&amp;趋势安全」（一次满仓）或「半额&amp;止损反手&amp;风险」（各半满仓·MA3判据）加载图表</div>
     </div>
   </div>
 
@@ -243,7 +253,7 @@ const API_BASE = (location.protocol === "file:" ||
   ((location.hostname === "127.0.0.1" || location.hostname === "localhost") && location.port !== "8000"))
   ? "http://127.0.0.1:8000" : "";
 
-let period = "m1";   // 默认 1 分钟档
+let period = "m5";   // 默认 5 分钟档（优先档，带星标）
 let dstart = "", dend = "";   // 时间范围（YYYY-MM-DD，空=不限）
 let autoRange = true;          // 时间范围是否仍是自动档（按周期默认：m1 近 2 个交易日、其余近 5 个）；用户手改日期后置 false，不再自动覆盖
 let chart = null;
@@ -260,9 +270,10 @@ let recentCache = { items: [], ts: 0 };
 const RECENT_N = 8;       // 下拉里最多列几条历史
 
 // ---- 止损反手 v13（2026-11-02）：买点 = 该标的 MA5 站上 MA85 + 实体底高于 MA85 + 收盘站上 MA5 + 收盘站上 MA20；卖点 = K 柱跌破 MA20 或 MA85。卖后未站回 MA20 就不买回 ----
+// ---- v15（2026-11-14）：买点再加“当根箱体（实体）顶和底都比前一根高”；卖点再加“当根箱体顶和底同时低于前一根”----
 // 加载开关：初始关闭，打开页面不取数也不画图；必须先选好上下标的与起止日期、再点「止损反手」才显示下方图表
 let srOn = false;
-let srFull = false;   // 资金口径：false = 每根 1 万逐根加仓（「止损反手」）；true = 一次全额买入、全额卖出（「全额策略」）
+let srMode = "batch";   // 档位：batch=分批&止损反手&安全（每根 1 万逐根加仓）；full=全额&趋势安全（一次全额买入/全平）；half=半额&止损反手&风险（双账户各半 + MA3/实体顶判据）
 let sr = null;      // /api/backtest 返回的 {trades, nav, stats, klines, ind}；null=未取到
 let srErr = "";     // 回测失败原因（只影响统计条，不影响 K 线渲染）
 let keepTip = "";   // 自动兜底时写下的说明：成功路径不能像往常那样把 kc-tip 清空，否则用户不知道日期被换过
@@ -278,6 +289,7 @@ const rangeDays = () => (period === "day" ? DAY_RANGE : RANGE_DAYS);
 const COL_SHORT = "#2f80ed";   // 空头腿统一用蓝色，与多头红绿区分
 // 「日」档走后端 bt_run（index.html 的回测策略），成交 reason 是 gc/add/back/hb/half/gb/dc/weak/drop，一并给中文名
 const SR_NAME = { lo: "开多", lc: "平多", so: "开空", sc: "平空", bo: "买反向", bc: "卖反向",
+  rb: "风险买入", rs: "风险卖出",   // 半额风险档：MA3 上行+实体顶抬高买入 / 实体顶未抬高卖出
   gc: "金叉买入", add: "加仓", back: "重回买入", hb: "半份买入", half: "减半仓", gb: "绿K减半", dc: "死叉清仓", weak: "弱势清仓", drop: "跌4%清仓" };
 const tsKey = v => String(v).replace(/[-:\s]/g, "");   // "2026-10-30 16:00" 与 "202610301600" 统一成紧凑串
 // 金额格式：千分位 + 两位小数，正数带 +（盈利为负时保留负号）
@@ -591,8 +603,10 @@ function updateHead() {
 }
 
 function renderTabs() {
+  // 星标跟随当前策略按钮：半额&止损反手&风险只看 60 分档，分批/全额仍看 5 分档
+  const starP = srMode === "half" ? "m60" : "m5";
   $("kc-tabs").innerHTML = PERIODS.map(([k, t]) =>
-    `<button class="kc-tab${k === period ? " on" : ""}" data-p="${k}">${t}</button>`).join("");
+    `<button class="kc-tab${k === period ? " on" : ""}${k === starP ? " starred" : ""}" data-p="${k}">${t}${k === starP ? "<span class=\"kc-star\">★</span>" : ""}</button>`).join("");
   $("kc-tabs").querySelectorAll(".kc-tab").forEach(b => {
     b.onclick = () => {
       if (b.dataset.p === period) return;
@@ -600,7 +614,7 @@ function renderTabs() {
       renderTabs();
       // 自动档下时间范围按新周期重算默认跨度（分钟档近 2 个交易日、日档近 1 个月）；手选过日期就不动它
       if (autoRange) { pickRange().then(() => { if (srOn) load(); }); return; }
-      if (srOn) load(); else tip("请先确定上/下标的与时间范围，再点「止损反手」");
+      if (srOn) load(); else tip("请先确定上/下标的与时间范围，再点三个策略按钮之一");
     };
   });
 }
@@ -678,7 +692,9 @@ async function loadSr() {
     // save=false：策略页只是看盘不落 backtests 表，避免刷出一堆记录；pair=下方标的，后端按跨标的换手重演
     // start/end 必传：否则统计条跑的是全量默认窗口，改时间范围只会让 K 线变而顶部指标不动
     const dr = (dstart || dend) ? `&start=${dstart}&end=${dend}` : "";
-    sr = await getJSON(`/api/backtest?symbol=${A.sym}&tf=sr5&p=${period}&capital=100000&save=false&pair=${B.sym}&full=${srFull ? "true" : "false"}${dr}`);
+    // 三档按钮各一个开关：full=1 走全额档，half=1 走半额风险档（判据与资金模型都不同），都不传即分批档
+    const modeQ = srMode === "full" ? "&full=true" : srMode === "half" ? "&half=true" : "";
+    sr = await getJSON(`/api/backtest?symbol=${A.sym}&tf=sr5&p=${period}&capital=100000&save=false&pair=${B.sym}${modeQ}${dr}`);
     srErr = "";
   } catch (e) { sr = null; srErr = String(e.message || e); }
 }
@@ -686,7 +702,7 @@ async function loadSr() {
 // 盈利数据条：累计收益/盈利/期末资金/回撤/开多开空平仓次数/胜率/回测区间
 function renderStat() {
   const el = $("kc-stat");
-  if (!srOn) { el.innerHTML = '<span class="lg">尚未加载：请先确定上/下标的与时间范围，再点「止损反手」或「全额策略」</span>'; return; }
+  if (!srOn) { el.innerHTML = '<span class="lg">尚未加载：请先确定上/下标的与时间范围，再点「分批&amp;止损反手&amp;安全」「全额&amp;趋势安全」或「半额&amp;止损反手&amp;风险」</span>'; return; }
   if (!sr) { el.innerHTML = `<span class="lg">${period === "day" ? "日线回测" : "止损反手回测"}失败：${srErr || "回测结果未返回（请重试，或换个时间范围）"}</span>`; return; }
   const s = sr.stats || {}, sg = v => `${(v || 0) >= 0 ? "+" : ""}${(v || 0).toFixed(2)}`;
   el.innerHTML = [
@@ -910,7 +926,7 @@ function pickSym(key, v, name) {
   dropSt[key].mode = "";
   rememberSym(v, t.name || NAMES[v] || "");   // 记进「最近搜过」，下次聚焦直接点
   applyCode(key, v, true);   // 只落地状态
-  startSr(srFull);           // 选完即出图（日期已默认填好）
+  startSr(srMode);           // 选完即出图（日期已默认填好，沿用当前档位）
 }
 
 // 标的选择器：聚焦即列候选，输入即搜，点候选或回车选高亮项；没候选时回车按手打代码生效（裸代码按美股补 us）
@@ -979,18 +995,20 @@ $("dclr").onclick = () => {
   srOn = false;
   $("kc-sr").classList.remove("on");
   $("kc-full").classList.remove("on");
+  $("kc-half").classList.remove("on");
   $("kc-plot").hidden = true;
   $("ttlA").innerHTML = "";
   $("ttlB").innerHTML = "";
   sr = null; srErr = "";
   $("kc-stat").innerHTML = "";
-  tip("已清除时间范围：请重新选择起止日期后再点「止损反手」或「全额策略」");
+  tip("已清除时间范围：请重新选择起止日期后再点「分批&amp;止损反手&amp;安全」「全额&amp;趋势安全」或「半额&amp;止损反手&amp;风险」");
 };
 
-// 两种资金口径共用的启动/重算流程：先校验上下标的与起止日期，齐全才显示下方图表
-//   full=false「止损反手」：每根最多 1 万、趋势没坏就逐根加仓
-//   full=true 「全额策略」：买入一次把可用资金全额买入，卖出仍一次性全额卖出
-async function startSr(full) {
+// 三档共用的启动/重算流程：先校验上下标的与起止日期，齐全才显示下方图表
+//   batch「分批&止损反手&安全」：每根最多 1 万、趋势没坏就逐根加仓
+//   full 「全额&趋势安全」：同一判据，买入一次全额、卖出一次全平
+//   half 「半额&止损反手&风险」：双账户各半本金、各自满仓进出；判据换成 MA3 上行 + 实体顶抬高/不抬高
+async function startSr(mode) {
   // 先把两个框里的最新内容落地（不等 blur 时序）：否则手改代码后直接点按钮，跑的仍是上一个标的
   let changed = false;
   for (const key of ["A", "B"]) {
@@ -1011,12 +1029,16 @@ async function startSr(full) {
   if ($("symB").value.trim() !== B.sym) miss.push("下方标的");
   if (!dstart) miss.push("开始日期");
   if (!dend) miss.push("结束日期");
-  const btn = full ? "「全额策略」" : "「止损反手」";
+  const btn = mode === "full" ? "「全额&amp;趋势安全」" : mode === "half" ? "「半额&amp;止损反手&amp;风险」" : "「分批&amp;止损反手&amp;安全」";
   if (miss.length) { tip(`请先选中${miss.join("、")}（从候选里点一只，或填完整代码回车），再点${btn}`, true); return; }
   if (dstart > dend) { tip("开始日期不能晚于结束日期", true); return; }
-  srFull = full;
-  $("kc-full").classList.toggle("on", full);
-  $("kc-sr").classList.toggle("on", !full);
+  srMode = mode;
+  // 半额&止损反手&风险只看 60 分档：点这个按钮时把周期直接切到 60 分（星标也跟着落到 60 分）
+  if (mode === "half" && period !== "m60") period = "m60";
+  $("kc-full").classList.toggle("on", mode === "full");
+  $("kc-sr").classList.toggle("on", mode === "batch");
+  $("kc-half").classList.toggle("on", mode === "half");
+  renderTabs();   // 星标档位跟着按钮走（半额风险→60分），切按钮当帧就要重画周期行
   srOn = true;
   $("kc-plot").hidden = false;
   tip("加载中…");   // 先把反馈给出来：重算交易日/取数都要等接口，不能干等着像死住
@@ -1028,14 +1050,15 @@ async function startSr(full) {
   dend = $("dend").value || dend;
   load();
 }
-$("kc-full").onclick = () => startSr(true);
-$("kc-sr").onclick = () => startSr(false);
+$("kc-full").onclick = () => startSr("full");
+$("kc-sr").onclick = () => startSr("batch");
+$("kc-half").onclick = () => startSr("half");
 
 bindCode($("symA"), "A");
 bindCode($("symB"), "B");
 renderTabs();
 renderLegend();
-// 打开页面即把时间范围填成当前标的最近 2 个交易日，用户直接点「止损反手」就能用
+// 打开页面即把时间范围填成当前标的最近 2 个交易日，用户直接点策略按钮就能用
 pickRange().then(ok => {
   if (ok === true) tip(`时间范围已默认近 ${rangeDays()} 个交易日：${dstart} ~ ${dend}（按 ${A.sym} 日K的实际交易日，周末与节假日不算）`);
   else if (ok === "fallback") tip(`日K暂时取不到，时间范围先按最近 ${rangeDays()} 个工作日填为：${dstart} ~ ${dend}（稍后重开页面会按真实交易日重算）`, true);

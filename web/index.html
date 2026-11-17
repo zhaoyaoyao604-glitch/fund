@@ -318,6 +318,9 @@
   .btcards button.on { border-color: #f99502; color: #f99502; background: var(--bg-accent-weak); }
   .btstat { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: var(--tx-2); padding: 4px 0 8px; }
   .btstat b { margin-left: 6px; font-weight: 700; color: var(--tx-1); }
+  /* 回测汇总的涨跌色：.btstat b 特异性高于 .up/.dn，不在这一层重申就会被白字盖掉 */
+  .btstat b.up { color: var(--up); }
+  .btstat b.dn { color: var(--dn); }
   .btchart { width: 100%; height: 300px; }
   /* 回测结果：区间日K（带买卖点）+ 成交明细 + 资金曲线 */
   .btkchart { width: 100%; height: 400px; }
@@ -433,6 +436,15 @@
   .dclr:hover { color: var(--up); }
   .dtot .dclr { display: inline-block; margin: 0 0 0 auto; padding: 0; }  /* 汇总行内末尾：与那排同 baseline 对齐并推到最右 */
   .dnote { color: var(--tx-7); font-size: 12px; text-align: center; padding: 16px 0 6px; }
+/* 删单撤销条：订单行末 ✕ 是即时落库的 DELETE（沙箱 iframe 会静默拦 confirm，不能靠二次确认），
+   误点后流水与持仓当场就没了且无任何提示；这里给 10 秒撤销窗口兼作删除回执 */
+  .undo { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 70;
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-radius: 8px;
+    background: var(--bg-soft2); border: var(--bd-1); box-shadow: var(--sh-pop2);
+    font-size: 13px; color: var(--tx-2); }
+  .undo b { color: var(--tx-1); font-weight: 600; }
+  .undo .ubtn { border: 0; background: none; color: var(--up); font-size: 13px; font-weight: 700; cursor: pointer; padding: 0; }
+  .undo .ux { border: 0; background: none; color: var(--tx-6); font-size: 13px; cursor: pointer; padding: 0 2px; }
 
   /* ================= 实时跟随仓（live）样式镜像 =================
      以下为上方全部 class 的 -live 副本（自动生成），live 页独立修改互不影响 */
@@ -644,7 +656,9 @@ async function getJSON(url, retry = 1) {
 // 交易类写操作（POST/DELETE）：与 getJSON 同样把后端 {error|detail} 抛成异常给调用方显示
 async function sendJSON(url, method, body) {
   const r = await fetch(API_BASE + url, {
-    method, headers: { "Content-Type": "application/json" },
+    // X-Fund-UI：所有写操作（下单/删单/清空/删持仓）都带这个头，后端 orders 系列接口据此拒绝非页面来源的写入。
+    // 加这个头是因为曾有一批本地脚本直接 POST /api/orders，把历史单静默写进账本（用户看到某天凭空多出买卖）。
+    method, headers: { "Content-Type": "application/json", "X-Fund-UI": "1" },
     body: body ? JSON.stringify(body) : undefined,
   });
   const d = await r.json();
@@ -1308,6 +1322,18 @@ function Card({ symbol, name, period, onPeriod, dstart, dend, index, onDragStart
   </div>`;
 }
 
+// 删单撤销条：删除即落库，这里给 10 秒撤销窗口。撤销=原样再 POST 一笔（id 会变，业务时间/价/量不变），
+// 与「改错=删了重录」的既有口径一致，不新增编辑接口
+function UndoBar({ undo, onUndo, onClose }) {
+  if (!undo) return null;
+  const o = undo.order;
+  return html`<div className="undo">
+    <span>已删除 <b>${o.name || o.symbol}</b> ${o.ts} ${o.side === "buy" ? "买入" : "卖出"} ${+o.qty} 股</span>
+    <button className="ubtn" title="按原样写回这一笔" onClick=${onUndo}>撤销</button>
+    <button className="ux" title="关闭" onClick=${onClose}>✕</button>
+  </div>`;
+}
+
 // 全部收益抽屉（hist）：右侧滑出。持仓/订单/已实现收益/可用资金均随回放视点截断（as_of）；
 // 持仓 tab 价格锚定视点：选了结束日期用截止日收盘（dayPx 与卡片同源），无则批量报价实时算
 // 标题右侧灰色小字显示筛选结束日期（即回放视点），未选结束日期时不显示
@@ -1905,10 +1931,29 @@ function LiveApp({ page, setPage, dstart, setDstart, theme, setTheme }) {
     return ns;
   });
   const onTrade = () => { loadHoldings(); loadOrders(); loadAccount(); };  // 成交后刷新持仓/订单/账户/汇总
-  const onDelOrder = id => sendJSON(`/api/orders/${id}?scope=live`, "DELETE")
-    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
-    // 失败（404 记录已不在库里/400 删除被依赖）也要重拉列表：404 时让残留行随刷新消失，避免页面行与库脱节后永远“删不掉”
-    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  // 删单（live）：先留底整行，DELETE 成功后才亮撤销条（理由同 hist 侧：原先一删了之无回执，误点即静默丢数据）
+  const onDelOrder = id => {
+    const o = orders.find(x => x.id === id);
+    sendJSON(`/api/orders/${id}?scope=live`, "DELETE")
+      .then(() => { loadOrders(); loadHoldings(); loadAccount(); if (o) armUndo(o); })
+      // 失败（404 记录已不在库里/400 删除被依赖）也要重拉列表：404 时让残留行随刷新消失，避免页面行与库脱节后永远“删不掉”
+      .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  };
+  const [undo, setUndo] = useState(null);  // {order}：刚删掉的那一笔，供撤销条原样写回
+  const undoT = useRef(null);
+  const armUndo = o => {
+    setUndo({ order: o });
+    clearTimeout(undoT.current);
+    undoT.current = setTimeout(() => setUndo(null), 10000);
+  };
+  const doUndo = () => {
+    const o = undo && undo.order;
+    if (!o) return;
+    sendJSON("/api/orders?scope=live", "POST", { symbol: o.symbol, name: o.name, side: o.side, price: o.price, qty: o.qty, ts: o.ts })
+      .then(() => { setUndo(null); loadOrders(); loadHoldings(); loadAccount(); })
+      .catch(e => alert("撤销失败：" + (e.message || e)));
+  };
+  useEffect(() => () => clearTimeout(undoT.current), []);
   // 删除持仓=后端清掉该标的全部买卖流水（连已实现收益一起消失）；不用 confirm：沙箱预览 iframe 会静默拦截模态框返回 false，表现为点击毫无反应
   const onDelHolding = s => sendJSON(`/api/holdings/${s}?scope=live`, "DELETE")
     .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
@@ -1961,6 +2006,7 @@ function LiveApp({ page, setPage, dstart, setDstart, theme, setTheme }) {
     return () => clearTimeout(t);
   }, [q]);
   return html`<div>
+    <${UndoBar} undo=${undo} onUndo=${doUndo} onClose=${() => setUndo(null)} />
     <div className="topbar-live">
       <span className="ptabs-live">
         ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on-live" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
@@ -1975,7 +2021,7 @@ function LiveApp({ page, setPage, dstart, setDstart, theme, setTheme }) {
         <${DPLive} value=${dend} onPick=${v => setDend(v)} title="结束日期" />
         ${(dstart || dend !== todayLive()) && html`<button className="clr-live" onClick=${() => { setDstart(""); setDend(todayLive()); }}>清除</button>`}
       </span>
-     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn-live" + (showBt ? " on-live" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button><a className="tbtn-live" href="fanshou.html" target="_blank" rel="noopener" title="反手：止损反手回测独立页" style=${{ textDecoration: "none", display: "inline-block" }}>反手</a></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn-live" + (showTotal ? " on-live" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn-live" + (showBt ? " on-live" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button><a className="tbtn-live" href="fanshou.html" target="_blank" rel="noopener" title="反手：止损反手回测独立页" style=${{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}>反手</a></span>
       <span className="search-live">
         个股：
         <input value=${q} placeholder="请输入名称/代码"
@@ -2632,10 +2678,30 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, them
     return ns;
   });
   const onTrade = () => { loadHoldings(); loadOrders(); loadAccount(); };  // 成交后刷新持仓/订单/账户/汇总
-  const onDelOrder = id => sendJSON(`/api/orders/${id}`, "DELETE")
-    .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
-    // 失败（404 记录已不在库里/400 删除被依赖）也要重拉列表：404 时让残留行随刷新消失，避免页面行与库脱节后永远“删不掉”
-    .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  // 删单：先在本页快照里留底整行（列表随视点截断，但被删的那行字段齐全），DELETE 成功后才亮撤销条；
+  // 早期实现是一删了之、无回执，误点后流水与持仓当场消失且页面毫无提示（用户以为“数据自己丢了”）
+  const onDelOrder = id => {
+    const o = orders.find(x => x.id === id);
+    sendJSON(`/api/orders/${id}`, "DELETE")
+      .then(() => { loadOrders(); loadHoldings(); loadAccount(); if (o) armUndo(o); })
+      // 失败（404 记录已不在库里/400 删除被依赖）也要重拉列表：404 时让残留行随刷新消失，避免页面行与库脱节后永远“删不掉”
+      .catch(e => { loadOrders(); loadHoldings(); loadAccount(); alert(e.message || e); });
+  };
+  const [undo, setUndo] = useState(null);  // {order}：刚删掉的那一笔，供撤销条原样写回
+  const undoT = useRef(null);
+  const armUndo = o => {
+    setUndo({ order: o });
+    clearTimeout(undoT.current);
+    undoT.current = setTimeout(() => setUndo(null), 10000);  // 10 秒后自动收起，避免长期挂着
+  };
+  const doUndo = () => {
+    const o = undo && undo.order;
+    if (!o) return;
+    sendJSON("/api/orders?scope=hist", "POST", { symbol: o.symbol, name: o.name, side: o.side, price: o.price, qty: o.qty, ts: o.ts })
+      .then(() => { setUndo(null); loadOrders(); loadHoldings(); loadAccount(); })
+      .catch(e => alert("撤销失败：" + (e.message || e)));
+  };
+  useEffect(() => () => clearTimeout(undoT.current), []);  // 卸载时清定时器，防对已卸载组件 setState
   // 删除持仓=后端清掉该标的全部买卖流水（不分回放视点全删，连已实现收益一起消失）；不用 confirm：沙箱预览 iframe 会静默拦截模态框返回 false，表现为点击毫无反应
   const onDelHolding = s => sendJSON(`/api/holdings/${s}`, "DELETE")
     .then(() => { loadOrders(); loadHoldings(); loadAccount(); })
@@ -2688,6 +2754,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, them
     return () => clearTimeout(t);
   }, [q]);
   return html`<div>
+    <${UndoBar} undo=${undo} onUndo=${doUndo} onClose=${() => setUndo(null)} />
     <div className="topbar">
       <span className="ptabs">
         ${PAGES.map(([k, t]) => html`<button key=${k} className=${k === page ? "on" : ""} onClick=${() => setPage(k)}>${t}</button>`)}
@@ -2702,7 +2769,7 @@ function HistApp({ page, setPage, dstart, dend, setStart, setEnd, setDates, them
         <${DP} value=${dend} onPick=${v => setEnd(v)} title="结束日期" />
         ${(dstart || dend) && html`<button className="clr" onClick=${() => setDates("", "")}>清除</button>`}
       </span>
-     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn" + (showBt ? " on" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button><a className="tbtn" href="fanshou.html" target="_blank" rel="noopener" title="反手：止损反手回测独立页" style=${{ textDecoration: "none", display: "inline-block" }}>反手</a></span>
+     <span style=${{ display: "flex", gap: 8 }}><button className=${"tbtn" + (showTotal ? " on" : "")} title="打开/关闭全部收益抽屉" onClick=${toggleTotal}>全部收益</button><button className=${"tbtn" + (showBt ? " on" : "")} title="回测：选一只标的与区间，按对应周期K线回放收益" onClick=${() => setShowBt(true)}>回测</button><a className="tbtn" href="fanshou.html" target="_blank" rel="noopener" title="反手：止损反手回测独立页" style=${{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}>反手</a></span>
       <span className="search">
         个股：
         <input value=${q} placeholder="请输入名称/代码"

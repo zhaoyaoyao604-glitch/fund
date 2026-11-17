@@ -24,3 +24,9 @@ _probe/
 
 # 本地临时运维脚本（Qoder 重启/代理修复等）
 .qoder_restart.sh
+
+# 推送渠道配置（含飞书/微信 webhook 密钥，不入库）
+server/push.json
+
+# 持仓库本地备份
+server/cards.db.bak*

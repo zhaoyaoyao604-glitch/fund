@@ -3,7 +3,10 @@
 # 美股：日/周/月K 走新浪全历史（不复权）+ 腾讯实时报价补当日活动K线；分时走东财 trends2（上游限流时返回提示）
 # 注：腾讯 WAF 会不定时挑战 ifzq 的某个子域（返回 501 JS验证页），故请求层做双域回退
 import asyncio
+import base64
 import datetime
+import hashlib
+import hmac
 import json
 import math
 import sqlite3
@@ -13,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -136,6 +139,12 @@ def _init_db():
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prefs'").fetchone():
         with con:
             con.execute("CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    # 订单写操作审计：每一笔新增/删除都落一行（时间/来源/参数），用于事后回答“这单是谁、什么时候写进来的”。
+    # 起因：2026-11-13 晚一批脚本事后无法从库内字段回溯来源，只能靠残留脚本推断
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orders_audit'").fetchone():
+        with con:
+            con.execute("CREATE TABLE orders_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
+                        "action TEXT NOT NULL, scope TEXT, detail TEXT, ip TEXT, ua TEXT, result TEXT)")
     # 最近搜过的标的：筛选框聚焦时直接列出来供点选；两个框共用一份，按最近一次选中时间倒序
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recent_sym'").fetchone():
         with con:
@@ -213,7 +222,7 @@ def _norm_asof(as_of):
     return a or None
 
 
-def _replay(con, exclude_id=None, scope="hist", as_of=None, splits=None, defer_today_sell=False):
+def _replay(con, exclude_id=None, scope="hist", as_of=None, splits=None, defer_today_sell=False, conflict_list=None):
     """按 (ts, id) 全量重演流水。返回 (pos, realized, conflict)：
     pos = symbol -> {shares, cost(移动加权均价), bought_today(当日买入的A股份额), sold_today(当日卖出份额),
     buy_ts(建仓首笔买入时间), name}；
@@ -277,8 +286,14 @@ def _replay(con, exclude_id=None, scope="hist", as_of=None, splits=None, defer_t
                 continue
             avail = p["shares"] if _is_t0(r["symbol"]) else p["shares"] - p["bought_today"]
             if r["qty"] > avail + 1e-9:
-                conflict = dict(r)
-                break
+                # 卖超坏账（历史遗留/直接改库/重复录入）：只登记冲突供删除与插单预检点名，绝不 break。
+                # 早先的中断会让该笔之后所有标的的流水整体不参与重演，表现为「某天之后整屏持仓/收益凭空消失」
+                # （一笔坏账拖垮全部标的的假故障）。该笔按无效单跳过：不扣份额、不计已实现，后续流水照常重演
+                if conflict is None:
+                    conflict = dict(r)
+                if conflict_list is not None:
+                    conflict_list.append(dict(r))  # 调用方传 list 即可拿全量冲突，做「删前/插前 vs 之后」的新增比对
+                continue
             realized[r["id"]] = (r["price"] - p["cost"]) * r["qty"]
             p["shares"] -= r["qty"]
             if p["shares"] <= 1e-9:  # 清仓：均价、当日买入与买入时间一并归零
@@ -1123,6 +1138,12 @@ SR_BUY_ABOVE_FAST = True  # True = 买点/加仓要求当根收盘价 > MA5；Fa
 # 却仍在 MA20 下方又买回」的来回磨损。补上门槛后，收盘在 MA20 下方时一律不买/不加仓，
 # 必须等价格重新站回 MA20 之上（通道修复）才恢复逐根 1 万的加仓，卖/买对 MA20 互为镜像。
 SR_BUY_ABOVE_MID = True  # True = 买点/加仓要求当根收盘价 > MA20；False = 不看这一条
+# v15（2026-11-14 用户口径）：买卖各补一道「箱体（实体开→收）相对前一根的升降」门槛。
+#   买：当根箱体顶和底都高于前一根 → 才算渠道抬升，与上面四条并行（AND）；
+#   卖：当根箱体顶和底都低于前一根 → 立刻全平（与买点严格对称，只要破底不改顶不算）。
+#   区间首根无前一根可比，抬升/跌破都不成立（不买、不触发这一条卖点）。
+SR_REQ_BOX_UP = True   # True = 买点/加仓要求当根实体顶、底都 > 前一根实体顶、底
+SR_SELL_BOX_DN = True  # True = 当根实体顶、底都 < 前一根实体顶、底时当根全平（卖点第三条）
 SR_CONFIRM = 1      # 连续确认根数：1 = 当根就动手
 SR_CD = 0           # 两次动作之间的冷却根数：0 = 不冷却，破位当根即可反手
 SR_TRAIL = None     # 移动止损倍数：None = 不设止损（卖点只有掉下慢线）
@@ -1293,11 +1314,13 @@ def bt_run_pair(rows_a, rows_b, sym_a, sym_b, capital,
                 ma5_a=None, ma85_a=None, ma5_b=None, ma85_b=None,
                 ma20_a=None, ma20_b=None, full=False):
     # 跨标的止损反手（规则见文件头 SR_* 常量）：两条腿各看自己的均线，当根站上就买、跌破就卖。
-    #   入场（v11+v12+v13）：A 的 MA5 > MA85、当根实体底 > MA85、收盘价 > MA5、且收盘价 > MA20 → target=A；B 同判；
+    #   入场（v11+v12+v13+v15）：A 的 MA5 > MA85、当根实体底 > MA85、收盘价 > MA5、收盘价 > MA20、
+    #     且当根箱体（实体开→收）的顶与底都高于前一根 → target=A；B 同判；
     #     两边都成立取 MA5/MA85 更大的那边，都不成立空仓。v13 的「收盘 > MA20」与卖点的「收盘 < MA20」互为镜像：
     #     跌破 MA20 卖掉后，价格没重新站回 MA20 上方就一直不买回（下降通道不接），站回去才恢复逐根加仓。
-    #     实体底 = min(开盘, 收盘)，不含影线；SR_REQ_BODY/SR_BUY_ABOVE_FAST/SR_BUY_ABOVE_MID 分别可关上述三条门槛。
-    #   离场：持仓侧自己的均线失守——收盘价跌破 MA20 或 MA85 任意一条（v12 两条并存，先破哪条算哪条）就当根全平。
+    #     实体底 = min(开盘, 收盘)，不含影线；SR_REQ_BODY/SR_BUY_ABOVE_FAST/SR_BUY_ABOVE_MID/SR_REQ_BOX_UP 各管一条门槛。
+    #   离场：持仓侧自己的均线失守——收盘价跌破 MA20 或 MA85 任意一条（v12 两条并存，先破哪条算哪条）就当根全平；
+    #     v15 再加一条：当根箱体顶与底同时低于前一根（渠道下移）也当根全平，由 SR_SELL_BOX_DN 开关控制。
     # 买卖各扣 SR_COST 成本；SR_TRAIL 默认 None（不额外设止损）。
     # B 的时间轴与 A 不一定逐根对齐（停牌/上市日不同）：按时间取 B 收盘/ATR/均线，缺根沿用上一根。
     # 资金：两条腿共用一份本金（v8），每笔最多 SR_EACH，趋势没坏就每根再加一笔，卖出一次性全平。
@@ -1306,17 +1329,22 @@ def bt_run_pair(rows_a, rows_b, sym_a, sym_b, capital,
     cash = float(capital)
     qty_a, cost_a = 0.0, 0.0    # A 腿：持仓数量 / 当前这一轮累计买入本钱（含成本）
     qty_b, cost_b = 0.0, 0.0    # B 腿：同上
-    bmap, batr, bma, bbody = {}, {}, {}, {}
+    bmap, batr, bma, bbody, bbox, bprev = {}, {}, {}, {}, {}, {}
     atr_b = sr_atr(rows_b)
     ma5b = ma5_b if (ma5_b and len(ma5_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_FAST)
     ma85b = ma85_b if (ma85_b and len(ma85_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_SLOW)
     ma20b = ma20_b if (ma20_b and len(ma20_b) == len(rows_b)) else sr_ma(rows_b, SR_MA_MID)
+    ptop_b = pbot_b = None                     # B 自己上一根的箱体（实体）顶/底
     for r, a, f, s, t in zip(rows_b, atr_b, ma5b, ma85b, ma20b):
         k = r[0][:16] if len(r[0]) > 10 else r[0][:10]
         bmap[k] = float(r[2])
         batr[k] = a
         bma[k] = (f, s, t)
-        bbody[k] = min(float(r[1]), float(r[2]))   # 实体底：买点要求它高于 B 自己的 MA85
+        top_b, bot_b, _ = bt_box(r)
+        bbody[k] = bot_b                          # 实体底：买点要求它高于 B 自己的 MA85
+        bbox[k] = top_b                           # 实体顶：v15 箱体抬升/跌破要比它
+        bprev[k] = (ptop_b, pbot_b)               # B 上一根箱体：按 B 自己的相邻根取，不跟 A 的下标
+        ptop_b, pbot_b = top_b, bot_b
     atr_a = sr_atr(rows_a)
     ma5 = ma5_a if (ma5_a and len(ma5_a) == len(rows_a)) else sr_ma(rows_a, SR_MA_FAST)
     ma85 = ma85_a if (ma85_a and len(ma85_a) == len(rows_a)) else sr_ma(rows_a, SR_MA_SLOW)
@@ -1362,22 +1390,39 @@ def bt_run_pair(rows_a, rows_b, sym_a, sym_b, capital,
         mid = ma20[i] if i < len(ma20) else None
         fast_b, slow_b, mid_b = bma.get(date, (None, None, None))
         body_a = min(float(r[1]), close)   # 当根实体底（开、收取低者），影线不计
+        body_top_a = max(float(r[1]), close)          # 当根实体顶
+        ptop_a = pbot_a = None
+        if i >= 1:
+            ptop_a, pbot_a, _ = bt_box(rows_a[i - 1])  # 上一根箱体（实体）顶/底
+        box_up_a = ptop_a is not None and body_top_a > ptop_a and body_a > pbot_a
+        box_dn_a = ptop_a is not None and body_top_a < ptop_a and body_a < pbot_a
         su = su + 1 if fast > slow * (1 + SR_MA_BUF) else 0
-        # 买点（v11 实体底门槛 + v12 站上 MA5）：均线交叉、实体长在 MA85 上方，且收盘价还要站回 MA5 之上
+        # 买点（v11 实体底门槛 + v12 站上 MA5 + v15 箱体抬升）：均线交叉、实体长在 MA85 上方、
+        # 收盘站回 MA5 之上，且当根箱体顶与底都要比前一根高
         up_a = (su >= SR_CONFIRM and (not SR_REQ_BODY or body_a > slow)
                 and (not SR_BUY_ABOVE_FAST or close > fast)
-                and (not SR_BUY_ABOVE_MID or mid is None or close > mid))
+                and (not SR_BUY_ABOVE_MID or mid is None or close > mid)
+                and (not SR_REQ_BOX_UP or box_up_a))
         # v13：收盘在 MA20 下方视为「下降通道未修复」，一律不买——与下方 dn 的 MA20 卖点互为镜像
-        # 卖点（用户口径）：K 柱收盘跌破 MA20 或 MA85 任意一条就全卖，不等 MA5 下穿（两条并存、先破哪条算哪条）
-        dn_a = close < slow or (mid is not None and close < mid)
+        # 卖点（用户口径）：K 柱收盘跌破 MA20 或 MA85 任意一条就全卖，不等 MA5 下穿（两条并存、先破哪条算哪条）；
+        # v15 起再加：当根箱体顶与底同时低于前一根（渠道下移）也当根全平
+        dn_a = close < slow or (mid is not None and close < mid) or (SR_SELL_BOX_DN and box_dn_a)
         up_b = dn_b = False
         if fast_b and slow_b:
             fu = fu + 1 if fast_b > slow_b * (1 + SR_MA_BUF) else 0
             body_b = bbody.get(date)
+            top_b2 = bbox.get(date)
+            ptop_b2, pbot_b2 = bprev.get(date, (None, None))
+            box_up_b = (ptop_b2 is not None and top_b2 is not None and top_b2 > ptop_b2
+                        and body_b is not None and body_b > pbot_b2)
+            box_dn_b = (ptop_b2 is not None and top_b2 is not None and top_b2 < ptop_b2
+                        and body_b is not None and body_b < pbot_b2)
             up_b = (fu >= SR_CONFIRM and (not SR_REQ_BODY or (body_b is not None and body_b > slow_b))
                     and (not SR_BUY_ABOVE_FAST or last_b > fast_b)
-                    and (not SR_BUY_ABOVE_MID or mid_b is None or last_b > mid_b))
-            dn_b = last_b < slow_b or (mid_b is not None and last_b < mid_b)
+                    and (not SR_BUY_ABOVE_MID or mid_b is None or last_b > mid_b)
+                    and (not SR_REQ_BOX_UP or box_up_b))
+            dn_b = (last_b < slow_b or (mid_b is not None and last_b < mid_b)
+                    or (SR_SELL_BOX_DN and box_dn_b))
         # 哪边趋势好买哪边：两边都满足时比快慢线乖离，都不满足时空仓
         target = None
         if up_a and up_b:
@@ -1496,6 +1541,164 @@ def bt_run_pair(rows_a, rows_b, sym_a, sym_b, capital,
             "float_pnl": round(float_pnl, 2),
             "pair": True, "sym_a": sym_a, "sym_b": sym_b,
             "full": 1 if full else 0,   # 资金口径标识：1=一次全额买入/全额卖出，0=每根 SR_EACH 逐根加仓
+            "first": rows_a[0][0][:10] if rows_a else "", "last": rows_a[-1][0][:10] if rows_a else "",
+            "n": len(rows_a), "days": days,
+        },
+    }
+
+
+# v16（2026-11-14 用户口径）：页面第三档「半额&止损反手&风险」——资金与判据都换成另一套：
+#   资金：本金对半拆给 A/B 两条腿各自独立（各 capital/2），每笔买入花掉该腿自己手上的全部现金（一次打满自己那半），
+#         卖出后钱回到该腿，两腿互不调剂——即“做多和做空平分全额，每笔买卖各自手上的全额”。
+#   买：当根 MA3 高于前一根 MA3（3 根均线趋势向上）且当根实体顶 max(开,收) 高于前一根实体顶 → 该腿满仓买入。
+#       刻意不看 MA5/MA20/MA85：风险档要的就是短周期更敏感，破了 85 线也照样持有。
+#   卖：当根实体顶 <= 前一根实体顶（第二根没再抬高）→ 该腿当根全平，不等破均线。
+#   区间首根没有前一根可比，既不买也不卖；B 腿按其自身相邻根取上一根（时间轴与 A 不一定逐根对齐）。
+RISK_MA = 3
+# 风险档成交原因（前端 SR_NAME 必须有对应中文名，否则成交气泡退化成「成交」二字）
+RISK_REASON_BUY = "rb"    # 风险档买入：MA3 上行 + 实体顶抬高
+RISK_REASON_SELL = "rs"   # 风险档卖出：实体顶没再抬高
+
+
+def bt_run_pair_half(rows_a, rows_b, sym_a, sym_b, capital, ma3_a=None, ma3_b=None):
+    # 半额风险档：双账户各拿一半本金、各自全额进出（见文件尾 RISK_* 注释）；输出契约与 bt_run_pair 一致
+    half = float(capital) / 2
+    cash_a = cash_b = half
+    qty_a, cost_a = 0.0, 0.0     # A 腿：持仓数量 / 本轮买入本钱
+    qty_b, cost_b = 0.0, 0.0     # B 腿：同上
+    ma3 = ma3_a if (ma3_a and len(ma3_a) == len(rows_a)) else sr_ma(rows_a, RISK_MA)
+    ma3b = ma3_b if (ma3_b and len(ma3_b) == len(rows_b)) else sr_ma(rows_b, RISK_MA)
+    # B 的时间轴与 A 不一定逐根对齐：按日期取 B 的收盘/实体顶/上一根实体顶/MA3/上一根 MA3，缺根沿用上一根
+    bmap, pma3_b, ptop_b = {}, None, None
+    for r, m in zip(rows_b, ma3b):
+        k = r[0][:16] if len(r[0]) > 10 else r[0][:10]
+        top_b, _bot_b, _hgt_b = bt_box(r)
+        bmap[k] = (float(r[2]), top_b, ptop_b, m, pma3_b)
+        pma3_b, ptop_b = m, top_b
+    trades, nav = [], []
+    peak, mdd, win, closed, realized_all = float(capital), 0.0, 0, 0, 0.0
+    realized_a = realized_b = 0.0
+    n_a = n_b = 0
+    cur_b = None                    # 当前 A 根对应的 B 状态元组（缺根时沿用上一根，但只在该日有根时才允许成交）
+    last_b = None
+    prev_top_a = prev_ma3_a = None  # A 自己上一根的实体顶 / MA3
+
+    def _mark_after_trade():
+        # 净值一律在成交全部落账后回写：先记后成交会漏掉当根成本（与 bt_run_pair 同一处理）
+        e = cash_a + qty_a * close + cash_b + qty_b * (last_b or 0.0)
+        nav[-1]["equity"] = round(e, 2)
+        nav[-1]["pct"] = round((e / float(capital) - 1) * 100, 4)
+
+    for i, r in enumerate(rows_a):
+        date = r[0][:16] if len(r[0]) > 10 else r[0][:10]
+        close = float(r[2])
+        has_b = date in bmap
+        if has_b:
+            cur_b = bmap[date]
+            last_b = cur_b[0]
+        equity = cash_a + qty_a * close + cash_b + qty_b * (last_b or 0.0)
+        if equity > peak:
+            peak = equity
+        mdd = min(mdd, equity / peak - 1)
+        nav.append({"date": date, "equity": round(equity, 2),
+                    "pct": round((equity / float(capital) - 1) * 100, 4)})
+        top_a, _bot_a, _hgt_a = bt_box(r)
+        m3a = ma3[i] if i < len(ma3) else None
+        if i >= 1 and m3a is not None and prev_ma3_a is not None and prev_top_a is not None:
+            rise_a = top_a > prev_top_a                 # 实体顶比前一根高
+            if qty_a > 0 and not rise_a:
+                amt = qty_a * close * (1 - SR_COST)
+                cash_a += amt
+                gain = amt - cost_a
+                trades.append({"date": date, "sym": sym_a, "side": "sell", "leg": "A",
+                               "reason": RISK_REASON_SELL, "note": "实体顶未抬高",
+                               "price": round(close, 4), "qty": round(qty_a, 4),
+                               "amount": round(amt, 2), "realized": round(gain, 2)})
+                qty_a, cost_a = 0.0, 0.0
+                closed += 1
+                realized_all += gain
+                realized_a += gain
+                win += 1 if gain > 0 else 0
+                _mark_after_trade()
+            elif qty_a <= 0 and m3a > prev_ma3_a and rise_a:
+                amt = cash_a                             # 一次打满该腿自己那半额
+                if amt > 0:
+                    qty_a = amt * (1 - SR_COST) / close
+                    cost_a = amt
+                    cash_a = 0.0
+                    trades.append({"date": date, "sym": sym_a, "side": "buy", "leg": "A",
+                                   "reason": RISK_REASON_BUY, "note": "MA3上行+实体顶抬高",
+                                   "price": round(close, 4), "qty": round(qty_a, 4),
+                                   "amount": round(amt, 2), "realized": None})
+                    n_a += 1
+                    _mark_after_trade()
+        if has_b and cur_b is not None and i >= 1:
+            b_close, b_top, b_ptop, b_ma3, b_pma3 = cur_b
+            if b_top is not None and b_ptop is not None and b_ma3 is not None and b_pma3 is not None:
+                rise_b = b_top > b_ptop
+                if qty_b > 0 and not rise_b:
+                    amt = qty_b * b_close * (1 - SR_COST)
+                    cash_b += amt
+                    gain = amt - cost_b
+                    trades.append({"date": date, "sym": sym_b, "side": "sell", "leg": "B",
+                                   "reason": RISK_REASON_SELL, "note": "实体顶未抬高",
+                                   "price": round(b_close, 4), "qty": round(qty_b, 4),
+                                   "amount": round(amt, 2), "realized": round(gain, 2)})
+                    qty_b, cost_b = 0.0, 0.0
+                    closed += 1
+                    realized_all += gain
+                    realized_b += gain
+                    win += 1 if gain > 0 else 0
+                    _mark_after_trade()
+                elif qty_b <= 0 and b_ma3 > b_pma3 and rise_b:
+                    amt = cash_b                         # 一次打满该腿自己那半额
+                    if amt > 0:
+                        qty_b = amt * (1 - SR_COST) / b_close
+                        cost_b = amt
+                        cash_b = 0.0
+                        trades.append({"date": date, "sym": sym_b, "side": "buy", "leg": "B",
+                                       "reason": RISK_REASON_BUY, "note": "MA3上行+实体顶抬高",
+                                       "price": round(b_close, 4), "qty": round(qty_b, 4),
+                                       "amount": round(amt, 2), "realized": None})
+                        n_b += 1
+                        _mark_after_trade()
+        prev_top_a, prev_ma3_a = top_a, m3a
+    end_eq = nav[-1]["equity"] if nav else float(capital)
+    total = (end_eq / float(capital) - 1) * 100
+    days = 0
+    if len(rows_a) >= 2:
+        days = (datetime.date.fromisoformat(rows_a[-1][0][:10]) - datetime.date.fromisoformat(rows_a[0][0][:10])).days
+    years = days / 365
+    px = float(rows_a[-1][2]) if rows_a else float(capital)
+    px_b = last_b if last_b is not None else px
+    # 每腿盈亏 = 该腿已实现 + 当前浮动；两腿各自独立半仓，故 pnl_a + pnl_b 恒等于 end − capital
+    pnl_a = realized_a + (qty_a * px - cost_a)
+    pnl_b = realized_b + (qty_b * px_b - cost_b)
+    float_pnl = (qty_a * px - cost_a) + (qty_b * px_b - cost_b)
+    return {
+        "trades": trades, "nav": nav,
+        "stats": {
+            "capital": round(float(capital), 2), "end": round(end_eq, 2),
+            "total": round(total, 2), "mdd": round(mdd * 100, 2),
+            "ann": round((pow(1 + total / 100, 1 / years) - 1) * 100, 2) if years >= 0.25 else None,
+            "buys": sum(1 for t in trades if t["side"] == "buy"),
+            "sells": closed,
+            "longs": n_a, "shorts": n_b,
+            "flips": n_a + n_b,          # 两条腿各自满仓建仓的次数之和
+            "closes": closed, "win": win,
+            "winrate": round(win / closed * 100, 1) if closed else None,
+            "realized": round(realized_all, 2),
+            "realized_a": round(realized_a, 2), "realized_b": round(realized_b, 2),
+            "pnl": round(end_eq - float(capital), 2),
+            "pnl_a": round(pnl_a, 2), "pnl_b": round(pnl_b, 2),
+            "ret_a": round(pnl_a / float(capital) * 100, 2) if capital else None,
+            "ret_b": round(pnl_b / float(capital) * 100, 2) if capital else None,
+            "float_a": round(pnl_a - realized_a, 2), "float_b": round(pnl_b - realized_b, 2),
+            "open_qty": round(qty_a, 4), "open_cost": round(px if qty_a else 0.0, 4),
+            "short_qty": round(qty_b, 4), "short_cost": round(px_b if qty_b else 0.0, 4),
+            "float_pnl": round(float_pnl, 2),
+            "pair": True, "sym_a": sym_a, "sym_b": sym_b,
+            "full": 0, "half": 1,      # 资金口径标识：half=1 → 双账户各半、各自全额进出（风险档）
             "first": rows_a[0][0][:10] if rows_a else "", "last": rows_a[-1][0][:10] if rows_a else "",
             "n": len(rows_a), "days": days,
         },
@@ -1708,7 +1911,7 @@ def _bt_day_legs(rows_a, ind_a, sym_a, mkt_a, rows_b, ind_b, sym_b, mkt_b, capit
 async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
                    capital: float = 100000.0, each: float = 10000.0,
                    name: str = "", save: bool = True, tf: str = "day", p: str = "", pair: str = "",
-                   full: bool = False):
+                   full: bool = False, half: bool = False):
     if capital <= 0 or each <= 0:
         return {"error": "本金与单次买入金额需大于 0"}
     st_tf = BT_STRATS.get(tf)
@@ -1727,7 +1930,19 @@ async def backtest(symbol: str = Query(...), start: str = "", end: str = "",
     if len(rows) < 3:
         return {"error": "区间内 K 线不足（落在周末/停牌或超出行情源可回溯范围），请换个区间"}
     ind = d.get("ind") or {}
-    if tf == "sr5" and pair and st_tf["period"] == "day":
+    if tf == "sr5" and pair and half:
+        # v16「半额&止损反手&风险」：双账户各半本金 + MA3 上行/实体顶抬升判据，走 bt_run_pair_half；
+        # 日档也走这套（不用 bt_run 的金叉连买），保证三档按钮的差异只由按钮本身决定
+        db = await kline(pair, st_tf["period"], st_tf["limit"], start, end)
+        rows_b = db.get("klines") or []
+        if st_tf["period"] != "day":
+            rows_b = [[bt_lab(r[0])] + list(r[1:]) for r in rows_b]
+        if len(rows_b) < 3:
+            return {"error": f"反向标的 {pair} 在该区间取不到K线，请检查代码或换个周期"}
+        ind_b = db.get("ind") or {}
+        res = bt_run_pair_half(rows, rows_b, symbol, pair, capital,
+                               ind.get("ma3") or [], ind_b.get("ma3") or [])
+    elif tf == "sr5" and pair and st_tf["period"] == "day":
         # 日档（页面点「日」）：买卖改按 index.html 的回测策略（bt_run：MA3 金叉当根起连买 + 四道买入门禁 +
         # 减半仓/半份买入 + 死叉/弱势/跌4% 清仓），不再走 bt_run_pair 的 MA5/MA85 跨标的止损反手
         db = await kline(pair, "day", st_tf["limit"], start, end)
@@ -1959,8 +2174,32 @@ async def orders_get(scope: str = "hist", as_of: str = ""):
             "realized_total": round(sum(realized.values()), 2)}
 
 
+def _require_ui(request: Request):
+    # 只允许看盘页面写交易流水：前端 sendJSON 统一带 X-Fund-UI: 1，本地脚本/自动化默认拿不到这个头。
+    # 起因是 2026-11-13 晚有一批脚本直接 POST /api/orders，把 11 条历史单静默写进 orders（含方向被改的
+    # usSOXS 与重复的 usSOXL），用户发现 10-30 同时出现做多与做空。校验从机制上堵死非人工写账本。
+    if not request or request.headers.get("x-fund-ui") != "1":
+        raise HTTPException(403, "只允许在看盘页面上操作订单。如果你的看盘页面开了一阵没刷新，请按 Ctrl+F5 重新加载后再操作（新页面才会带上写操作凭证）")
+
+
+def _audit(request, action, scope, detail, result="ok"):
+    # 写操作流水（只增不改）：谁在什么时候对哪个视图做了什么。写失败只吞异常，不影响主流程
+    try:
+        con = _conn()
+        with con:
+            con.execute("INSERT INTO orders_audit (ts, action, scope, detail, ip, ua, result) VALUES (?,?,?,?,?,?,?)",
+                        (datetime.datetime.now().strftime(TS_FMT), action, scope,
+                         json.dumps(detail, ensure_ascii=False),
+                         (request.client.host if request and request.client else ""),
+                         (request.headers.get("user-agent") or "")[:200], result))
+        con.close()
+    except Exception:
+        pass
+
+
 @app.post("/api/orders")
-async def orders_post(payload: dict, scope: str = "hist"):
+async def orders_post(payload: dict, request: Request, scope: str = "hist"):
+    _require_ui(request)
     sym = str(payload.get("symbol") or "").strip()
     side = str(payload.get("side") or "").strip().lower()
     try:
@@ -1977,6 +2216,18 @@ async def orders_post(payload: dict, scope: str = "hist"):
     if not (price > 0 and qty > 0):
         raise HTTPException(400, "price/qty 必须大于 0")
     con = _conn()
+    # 重复单拦截：同标的/方向/价格/数量/日期，且 10 分钟内刚录过一笔完全相同的，判为重复提交直接拒。
+    # 历史事故：10-28 23:50~23:56 日盈 200x2、三星 200x2、银行ETF 7000x2 三组完全重复单被照收，
+    # 持仓凭空翻倍、成本被摊薄，用户看到“持仓比我实际多”、“亏得离谱”，误以为是系统乱改账本
+    dup = con.execute(
+        f"SELECT id, created_at FROM {_tbl(scope, 'orders')} WHERE symbol=? AND side=? AND ts=? "
+        f"AND ABS(price-?) < 1e-6 AND ABS(qty-?) < 1e-6 "
+        f"AND created_at >= datetime('now', 'localtime', '-10 minutes')",
+        (sym, side, ts, price, qty)).fetchone()
+    if dup:
+        con.close()
+        _audit(request, "dup-reject", scope, {"symbol": sym, "side": side, "price": price, "qty": qty, "ts": ts, "dup_id": dup["id"]}, "rejected")
+        raise HTTPException(409, f"重复订单：{ts[:10]} 刚已录过一笔完全相同的{'买入' if side == 'buy' else '卖出'} {sym} {qty:g} 股 @{price:g}（id={dup['id']}），本次未写入。确实要再记一笔请改数量或价格")
     name = str(payload.get("name") or "").strip()
     if not name:  # 名称快照：卡片表 → 同代码最近一笔流水 → 代码本身，逐层兜底
         c = con.execute(f"SELECT name FROM {_tbl(scope, 'cards')} WHERE symbol=?", (sym,)).fetchone()
@@ -1996,7 +2247,9 @@ async def orders_post(payload: dict, scope: str = "hist"):
             con.close()
             tip = "" if _is_t0(sym) or p["bought_today"] <= 1e-9 else "（A股当日买入次日可卖）"
             raise HTTPException(400, f"卖出数量超过可卖，{ts[:10]} 时可卖 {avail:g}{tip}")
-        old_conflict = _replay(con, scope=scope, splits=splits)[2]  # 存量卖超坏账（正常数据恒 None），供插入后对比
+        old_conflicts = []  # 存量卖超坏账 id 集合（正常数据为空），供插入后对比——只回滚「新增」的冲突
+        _replay(con, scope=scope, splits=splits, conflict_list=old_conflicts)
+        old_ids = {c["id"] for c in old_conflicts}
     with con:
         cur = con.execute(f"INSERT INTO {_tbl(scope, 'orders')} (symbol, name, side, price, qty, ts, created_at) "
                           f"VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2004,21 +2257,34 @@ async def orders_post(payload: dict, scope: str = "hist"):
     oid = cur.lastrowid
     if side == "sell":
         # 时序兜底：落在历史时点的卖出可能挤占其后已录卖出的份额（或自身卖超），插入后全量重演即现冲突——回滚拒单。
-        # 与插入前存量冲突比对 id，坏账不误伤新单；买入只会缓解冲突，无需兜底
-        conflict = _replay(con, scope=scope, splits=splits)[2]
-        if conflict and conflict["id"] != (old_conflict or {"id": None})["id"]:
+        # 只比较「插入前没有的」冲突 id：存量坏账不误伤新单；买入只会缓解冲突，无需兜底
+        new_conflicts = []
+        _replay(con, scope=scope, splits=splits, conflict_list=new_conflicts)
+        conflict = next((c for c in new_conflicts if c["id"] not in old_ids), None)
+        if conflict:
             with con:
                 con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,))
             con.close()
             raise HTTPException(400, f"卖出将超过持仓：{conflict['name']} {conflict['ts']} 的卖出将超过当时可卖，请调小数量")
     realized = _replay(con, scope=scope, splits=splits)[1].get(oid)
     con.close()
+    _audit(request, "create", scope, {"id": oid, "symbol": sym, "side": side, "price": price, "qty": qty, "ts": ts})
     return {"ok": True, "order": {"id": oid, "symbol": sym, "name": name, "side": side,
                                   "price": price, "qty": qty, "ts": ts}, "realized": realized}
 
 
+@app.get("/api/orders/audit")
+async def orders_audit_list(limit: int = 100):
+    # 订单写操作审计（倒序）：回答“这一单是谁、什么时候、从哪写进来的”，不参与任何账本计算
+    con = _conn()
+    rows = con.execute("SELECT * FROM orders_audit ORDER BY id DESC LIMIT ?", (max(1, min(limit, 1000)),)).fetchall()
+    con.close()
+    return {"audit": [dict(r) for r in rows]}
+
+
 @app.delete("/api/orders")
-async def orders_clear(scope: str = "hist"):
+async def orders_clear(request: Request, scope: str = "hist"):
+    _require_ui(request)
     # 一键清空：hist + live 两张流水表一并删光（用户要求全局清空——曾发生只清 live 后 hist 回放表残留
     # 旧流水、回放视点仍显示旧收益的事故）；持仓清零、收益归 0、可用资金回到本金（皆为流水重演派生，不落库）；
     # 整表连删不会产生卖超坏账，无需 orders_delete 的删除被依赖预检；卡片与流水独立不受影响
@@ -2029,28 +2295,38 @@ async def orders_clear(scope: str = "hist"):
             cur = con.execute(f"DELETE FROM {t}")
             n += cur.rowcount
     con.close()
+    _audit(request, "clear", scope, {"deleted": n})
     return {"deleted": n}
 
 
 @app.delete("/api/orders/{oid}")
-async def orders_delete(oid: int, scope: str = "hist"):
+async def orders_delete(oid: int, request: Request, scope: str = "hist"):
+    _require_ui(request)
     con = _conn()
     if not con.execute(f"SELECT 1 FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,)).fetchone():
         con.close()
         raise HTTPException(404, "记录不存在")
     splits = await _splits_for(con, scope)
-    conflict = _replay(con, exclude_id=oid, scope=scope, splits=splits)[2]
+    # 只拒「本次删除新造成」的卖超：存量坏账（历史遗留/重复录入）不该让任何单都删不掉——
+    # 早先拿绝对冲突判，库里一旦有坏账就死锁，连清坏账本身都做不到
+    before, after = [], []
+    _replay(con, scope=scope, splits=splits, conflict_list=before)
+    _replay(con, exclude_id=oid, scope=scope, splits=splits, conflict_list=after)
+    before_ids = {c["id"] for c in before}
+    conflict = next((c for c in after if c["id"] not in before_ids), None)
     if conflict:  # 删掉这笔买入会让后续某笔卖出卖超：拒删并点名那笔卖出
         con.close()
         raise HTTPException(400, f"删除被依赖：{conflict['name']} {conflict['ts']} 的卖出将超过可卖持仓，请先删除该笔卖出")
     with con:
         con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE id=?", (oid,))
     con.close()
+    _audit(request, "delete", scope, {"id": oid})
     return {"ok": True}
 
 
 @app.delete("/api/holdings/{symbol}")
-async def holdings_delete(symbol: str, scope: str = "hist"):
+async def holdings_delete(symbol: str, request: Request, scope: str = "hist"):
+    _require_ui(request)
     # 持仓无独立表（由流水重演推导），删除=清掉该标的全部买卖流水：买卖一并消失，重演不会
     # 产生卖超坏账；卡片与流水独立不受影响；已实现收益随卖出流水一起消失（不分回放视点，全删）
     con = _conn()
@@ -2061,6 +2337,7 @@ async def holdings_delete(symbol: str, scope: str = "hist"):
     with con:
         con.execute(f"DELETE FROM {_tbl(scope, 'orders')} WHERE symbol=?", (symbol,))
     con.close()
+    _audit(request, "delete-holding", scope, {"symbol": symbol, "deleted": n})
     return {"ok": True, "deleted": n}
 
 
@@ -2271,19 +2548,24 @@ async def account_get(scope: str = "hist", as_of: str = ""):
     s = "live" if scope == "live" else "hist"
     con = _conn()
     row = con.execute("SELECT capital FROM account WHERE scope=?", (s,)).fetchone()
-    sql = f"SELECT side, price, qty, ts FROM {_tbl(scope, 'orders')}"
+    sql = f"SELECT id, side, price, qty, ts FROM {_tbl(scope, 'orders')}"
     args = ()
     if a:
         sql += " WHERE ts <= ?"
         args = (a,)
     rows = con.execute(sql, args).fetchall()
+    splits = await _splits_for(con, scope)
+    # 只有「重演时真正成交」的卖出才能回笼资金：卖超被 _replay 跳过的坏单（如 10-30 那笔已无持仓的
+    # usSOXS 卖出）曾在现金里凭空多出一笔钱（50.34×200=10068），而持仓根本没减，导致总资产虚增
+    _, realized, _ = _replay(con, scope=scope, as_of=a, splits=splits)
     con.close()
     capital = row["capital"] if row else 0.0
     # 卖出回笼资金次日到账（与持仓「卖出次日生效」同口径）：视点日卖出的钱不计入，
     # 否则当天份额还在市值里、卖出款又已进现金，总资产会凭空多出一笔
     today = (a or datetime.datetime.now().strftime(TS_FMT))[:10]
     cash = capital - sum(r["price"] * r["qty"] for r in rows if r["side"] == "buy") \
-        + sum(r["price"] * r["qty"] for r in rows if r["side"] == "sell" and r["ts"][:10] < today)
+        + sum(r["price"] * r["qty"] for r in rows
+              if r["side"] == "sell" and r["ts"][:10] < today and r["id"] in realized)
     return {"capital": capital, "cash": round(cash, 2)}
 
 
@@ -2549,4 +2831,219 @@ async def notify_scan(market: str = "all"):
     flat = [h for v in hits.values() for h in v]
     return {"count": n, "hits": flat, "heartbeat": dict(_REMIND_BEAT),
             "scanned": list(REMIND_CLOSE if market in ("", "all") else {market} & set(REMIND_CLOSE))}
+
+
+# ---------- 微信推送买卖点（「全额&趋势安全」判据 · 分钟档）----------
+# 口径：与反手页 fanshou.html 的按钮逐字一致——同 tf=sr5、同周期、同 full 开关、同本金，直接调 bt_run_pair
+# （full=true 即「全额&趋势安全」：一次把可用资金全额买入、卖出一次性全平）。不另写第二套判据，避免规则漂移。
+# 推送通道五选一（配在 server/push.json，改完无需重启，每轮重读）：
+#   serverchan = 微信「服务通知」（扫码拿 SendKey）  pushplus = 公众号模板消息（拿 token）
+#   wxpusher   = 关注公众号后按 uid 推            wecom    = 企业微信群机器人 webhook
+#   feishu     = 飞书群自定义机器人 webhook（免费；机器人开了签名校验才填 feishu_secret）
+# 去重：cards.db 的 push_sent 表按「A|B|K线时间|方向|腿」记一行，重启/重扫都不会重复推；
+# 每对标的首次扫描只记基线不推送，避免把窗口内历史成交一次性刷屏。
+PUSH_CFG_PATH = Path(__file__).resolve().parent / "push.json"
+PUSH_DEFAULT = {"channel": "", "serverchan": "", "pushplus": "", "wxpusher_app": "",
+                "wxpusher_uid": "", "wecom": "", "feishu": "", "feishu_secret": "",
+                "p": "m60", "full": True,
+                "capital": 100000.0, "pairs": [["usSOXS", "usSOXL"]], "poll": 30,
+                "toast": True, "days": 3}
+_PUSH_BEAT = {"n": 0, "at": "", "last": None}  # 心跳：/api/push/scan 回显，用于确认后台循环在跑
+
+
+def _push_cfg():
+    # 每轮重读：填完 token 不用重启服务就能生效；文件缺失/写坏都退回默认值，推送属旁路不拖累主链路
+    cfg = dict(PUSH_DEFAULT)
+    try:
+        cfg.update(json.loads(PUSH_CFG_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    pairs = []
+    for pr in cfg.get("pairs") or []:
+        if isinstance(pr, (list, tuple)) and len(pr) >= 2 and pr[0] and pr[1]:
+            pairs.append([str(pr[0]), str(pr[1])])
+    cfg["pairs"] = pairs
+    cfg["p"] = cfg["p"] if cfg.get("p") in SR_LIMITS else "m60"
+    cfg["days"] = int(cfg.get("days") or 3)
+    cfg["poll"] = max(10, int(cfg.get("poll") or 30))
+    return cfg
+
+
+def _push_dt(s):
+    # 分钟档标签统一成 "YYYY-MM-DD HH:MM"（bt_lab 产出），解析失败返回 None
+    try:
+        return datetime.datetime.strptime(str(s)[:16], "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+async def _wx_send(title, body):
+    # 四通道统一出口：返回 (ok, 说明)。未配置通道时直接返回 (False, "未配置")，由桌面通知兜底
+    cfg = _push_cfg()
+    ch = (cfg.get("channel") or "").strip().lower()
+    text = f"{title}\n{body}"
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as cli:  # trust_env=False：不读系统代理
+            if ch == "serverchan" and cfg.get("serverchan"):
+                r = await cli.post(f"https://sctapi.ftqq.com/{cfg['serverchan'].strip()}.send",
+                                   data={"title": title, "desp": body.replace("\n", "\n\n")})
+                j = r.json() if r.content else {}
+                return (j.get("code") == 0, str(j.get("message") or r.status_code))
+            if ch == "pushplus" and cfg.get("pushplus"):
+                r = await cli.post("https://www.pushplus.plus/send",
+                                   json={"token": cfg["pushplus"].strip(), "title": title,
+                                         "content": body.replace("\n", "<br>"), "template": "html"})
+                j = r.json() if r.content else {}
+                return (j.get("code") == 200, str(j.get("msg") or r.status_code))
+            if ch == "wxpusher" and cfg.get("wxpusher_app"):
+                uid = (cfg.get("wxpusher_uid") or "").strip()
+                r = await cli.post("https://wxpusher.zjiecode.com/api/send/message",
+                                   json={"appToken": cfg["wxpusher_app"].strip(), "content": text,
+                                         "summary": title[:99], "contentType": 1,
+                                         "uids": [uid] if uid else []})
+                j = r.json() if r.content else {}
+                return (j.get("code") == 1000, str(j.get("msg") or r.status_code))
+            if ch == "wecom" and cfg.get("wecom"):
+                r = await cli.post(cfg["wecom"].strip(), json={"msgtype": "text", "text": {"content": text}})
+                j = r.json() if r.content else {}
+                return (j.get("errcode") == 0, str(j.get("errmsg") or r.status_code))
+            if ch in ("feishu", "lark") and cfg.get("feishu"):
+                msg = {"msg_type": "text", "content": {"text": text}}
+                sec = (cfg.get("feishu_secret") or "").strip()
+                if sec:  # 机器人开了「签名校验」才需要：sign = base64(hmac_sha256(key="ts\nsecret", msg=""))
+                    ts = str(int(time.time()))
+                    msg["timestamp"] = ts
+                    msg["sign"] = base64.b64encode(hmac.new(f"{ts}\n{sec}".encode("utf-8"),
+                                                            b"", hashlib.sha256).digest()).decode()
+                r = await cli.post(cfg["feishu"].strip(), json=msg)
+                j = r.json() if r.content else {}
+                ok = j.get("code") == 0 or j.get("StatusCode") == 0
+                return (ok, str(j.get("msg") or j.get("StatusMessage") or r.status_code))
+    except Exception as e:
+        return (False, f"{type(e).__name__}: {e}")
+    return (False, "未配置通道")
+
+
+def _push_mark(con, key):
+    con.execute("INSERT OR IGNORE INTO push_sent(k, at) VALUES (?, ?)", (key, _beijing_now().strftime(TS_FMT)))
+
+
+async def push_scan_once(cfg=None):
+    # 扫一遍配置里的每对标的：跑引擎 → 取「已收盘且没推过」的成交 → 先扣桌面通知、再推微信
+    cfg = cfg or _push_cfg()
+    st = {"channel": cfg.get("channel") or "", "p": cfg["p"], "full": bool(cfg["full"]),
+          "pairs": cfg["pairs"], "events": [], "baseline": [], "sent": None, "err": None}
+    if not cfg["pairs"]:
+        return st
+    con = _conn()
+    con.execute("CREATE TABLE IF NOT EXISTS push_sent (k TEXT PRIMARY KEY, at TEXT NOT NULL)")
+    try:
+        for a, b in cfg["pairs"]:
+            try:
+                da = await kline(a, cfg["p"], SR_LIMITS[cfg["p"]], "", "")
+                db = await kline(b, cfg["p"], SR_LIMITS[cfg["p"]], "", "")
+            except Exception as e:
+                st["err"] = f"{a}/{b} 取数失败：{type(e).__name__}"
+                continue
+            if da.get("error") or db.get("error"):
+                st["err"] = f"{a}/{b} 取数失败：{da.get('error') or db.get('error')}"
+                continue
+            rows_a = [[bt_lab(r[0])] + list(r[1:]) for r in da.get("klines") or []]
+            rows_b = [[bt_lab(r[0])] + list(r[1:]) for r in db.get("klines") or []]
+            if len(rows_a) < 3 or len(rows_b) < 3:
+                continue
+            ia, ib = da.get("ind") or {}, db.get("ind") or {}
+            res = bt_run_pair(rows_a, rows_b, a, b, float(cfg["capital"]),
+                              ia.get("ma5") or [], ia.get("ma85") or [],
+                              ib.get("ma5") or [], ib.get("ma85") or [],
+                              ia.get("ma20") or [], ib.get("ma20") or [],
+                              full=bool(cfg["full"]))
+            initk = f"__init__|{a}|{b}"
+            first = con.execute("SELECT 1 FROM push_sent WHERE k=?", (initk,)).fetchone() is None
+            now = _mkt_now(_mkt_of(a))
+            for t in res.get("trades") or []:
+                dt = _push_dt(t.get("date"))
+                if dt is None or dt > now:  # 未收盘的当根不判，等它走完再看（分钟档最后一根可能是进行中）
+                    continue
+                if dt < now - datetime.timedelta(days=cfg["days"]):  # 停机太久的历史不补推，避免刷屏
+                    continue
+                key = f"{a}|{b}|{t['date']}|{t['side']}|{t['leg']}"
+                if con.execute("SELECT 1 FROM push_sent WHERE k=?", (key,)).fetchone():
+                    continue
+                _push_mark(con, key)
+                ev = {"pair": f"{a}/{b}", "date": t["date"], "side": t["side"],
+                      "sym": t.get("sym"), "leg": t.get("leg"), "price": t["price"],
+                      "amount": t.get("amount"), "note": t.get("note")}
+                if first:
+                    st["baseline"].append(key)  # 首次扫描：只记基线，不推历史成交
+                    continue
+                st["events"].append(ev)
+            if first:
+                _push_mark(con, initk)
+        con.commit()
+    finally:
+        con.close()
+    if st["events"]:
+        lines = []
+        for e in st["events"]:
+            o = "买入" if e["side"] == "buy" else "卖出"
+            lines.append(f"{e['date'][5:]} {o} {e['sym']} @{e['price']} 金额 {e['amount']}（{e['note']}）")
+        title = f"【全额&趋势安全·{cfg['p'].replace('m', '')}分】{len(st['events'])} 笔买卖点"
+        body = "\n".join(lines)
+        if cfg.get("toast"):
+            _toast(title, body)
+        ok, msg = await _wx_send(title, body)
+        st["sent"] = {"ok": ok, "msg": msg}
+    return st
+
+
+async def _push_loop():
+    # 每 poll 秒重扫一次：分钟档只有新 K 线收盘后才可能出新成交，未收盘的当根在扫描里被 dt > now 过滤掉。
+    # 再加一道“当地交易时段”门禁（8:50~16:40 含尾盘余量）：夜里不空转，省上游请求也避免无谓限流
+    while True:
+        try:
+            cfg = _push_cfg()
+            if any(_push_mkt_open(_mkt_of(a)) for a, _b in cfg["pairs"]):
+                await push_scan_once(cfg)
+        except Exception:
+            pass  # 推送属旁路功能，任何异常都不能影响行情主链路
+        _PUSH_BEAT["n"] += 1
+        _PUSH_BEAT["at"] = _beijing_now().strftime(TS_FMT)
+        await asyncio.sleep(_push_cfg()["poll"])
+
+
+def _push_mkt_open(mkt):
+    # 当地周一~周五 8:50~16:40 算可扫（A股/港股/美股统一口径，节假日靠“无新 K 线”自然跳过）
+    lt = _mkt_now(mkt)
+    if lt.weekday() >= 5:
+        return False
+    m = lt.hour * 60 + lt.minute
+    return 8 * 60 + 50 <= m <= 16 * 60 + 40
+
+
+@app.on_event("startup")
+async def _start_push_loop():
+    asyncio.create_task(_push_loop())
+
+
+@app.get("/api/push/test")
+async def push_test():
+    # 验证通道：立刻发一条测试消息（桌面 + 微信），返回各通道结果与当前配置摘要
+    cfg = _push_cfg()
+    title = "【测试】看盘买卖点推送"
+    body = f"通道={cfg.get('channel') or '未配置'}，周期={cfg['p']}，档位=" \
+           f"{'全额&趋势安全' if cfg['full'] else '分批'}，标的={cfg['pairs']}"
+    _toast(title, body)
+    ok, msg = await _wx_send(title, body)
+    return {"channel": cfg.get("channel") or "", "ok": ok, "msg": msg,
+            "p": cfg["p"], "full": bool(cfg["full"]), "pairs": cfg["pairs"],
+            "heartbeat": dict(_PUSH_BEAT)}
+
+
+@app.get("/api/push/scan")
+async def push_scan():
+    # 手动扫一次：返回本次将推的成交、首次基线数量、发送结果与心跳（用来验证后台循环真的在跑）
+    st = await push_scan_once()
+    st["heartbeat"] = dict(_PUSH_BEAT)
+    return st
 
